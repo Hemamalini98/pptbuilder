@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
-import { Download, RefreshCw, AlertTriangle, FileJson, Check, LayoutGrid, BarChart2, ImageOff } from 'lucide-react';
+import { Download, RefreshCw, AlertTriangle, FileJson, Check, LayoutGrid, BarChart2, ImageOff, Activity, ChevronDown, ChevronUp } from 'lucide-react';
 import { toast } from 'sonner';
 
 export const Step5Export: React.FC = () => {
@@ -10,13 +10,20 @@ export const Step5Export: React.FC = () => {
     resetSession
   } = useStore();
 
-  const [reportTab, setReportTab] = useState<'style' | 'figures'>('style');
+  const [reportTab, setReportTab] = useState<'style' | 'figures' | 'accessibility'>('style');
+  const [expandedCategories, setExpandedCategories] = useState<Record<string, boolean>>({});
   const [figureDiag, setFigureDiag] = useState<{ missing: string[]; unplaced: string[] } | null>(null);
+  const [accessibilityDiag, setAccessibilityDiag] = useState<{ issues: string[] } | null>(null);
 
   useEffect(() => {
     fetch('/api/figure-diagnostics')
       .then(r => r.json())
       .then(d => { if (d.ok) setFigureDiag({ missing: d.missing, unplaced: d.unplaced }); })
+      .catch(() => {});
+      
+    fetch('/api/accessibility-report')
+      .then(r => r.json())
+      .then(d => { if (d.ok) setAccessibilityDiag({ issues: d.issues }); })
       .catch(() => {});
   }, []);
 
@@ -277,6 +284,22 @@ export const Step5Export: React.FC = () => {
               </span>
             )}
           </button>
+          <button
+            onClick={() => setReportTab('accessibility')}
+            className={`flex items-center gap-2 px-5 py-3 text-xs font-bold uppercase tracking-wider transition-all border-b-2 relative ${
+              reportTab === 'accessibility'
+                ? 'border-[var(--color-amber)] text-[var(--color-navy)] bg-white'
+                : 'border-transparent text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5" />
+            Accessibility Report
+            {accessibilityDiag && accessibilityDiag.issues.length > 0 && (
+              <span className="ml-1 bg-amber-500 text-white text-[9px] font-black rounded-full px-1.5 py-0.5">
+                {accessibilityDiag.issues.length}
+              </span>
+            )}
+          </button>
         </div>
 
         {/* Style Report Tab */}
@@ -344,6 +367,90 @@ export const Step5Export: React.FC = () => {
             )}
           </div>
         )}
+
+        {/* Accessibility Report Tab */}
+        {reportTab === 'accessibility' && (() => {
+          // Group by Error Category using structured JSON
+          const groupedIssues = (accessibilityDiag?.issues || []).reduce((acc: Record<string, any[]>, issue: any) => {
+            const category = issue.category || 'General Issues';
+            acc[category] = acc[category] || [];
+            acc[category].push({ slide: issue.slide, detail: issue.detail });
+            return acc;
+          }, {});
+
+          const hasIssues = Object.keys(groupedIssues).length > 0;
+
+          return (
+            <div className="p-6 space-y-6 max-h-[620px] overflow-y-auto">
+              <div>
+                <h4 className="flex items-center gap-2 text-sm font-black text-amber-600 uppercase tracking-wider mb-4">
+                  <Activity className="w-4 h-4" />
+                  Accessibility Issues Found
+                  <span className="text-[10px] font-semibold text-amber-400 normal-case tracking-normal">(based on minimum font sizes, alt text, empty shapes)</span>
+                </h4>
+                {hasIssues ? (
+                  <div className="space-y-4">
+                    {Object.entries(groupedIssues).map(([errorCategory, issueList], idx) => {
+                      // Get unique slides for this category
+                      const slides = Array.from(new Set(issueList.map(i => i.slide).filter(s => s != null))).sort((a: any, b: any) => a - b);
+                      const isExpanded = expandedCategories[errorCategory] || false;
+                      
+                      return (
+                        <div key={idx} className="border border-amber-200 rounded-md overflow-hidden bg-white shadow-sm">
+                          <button 
+                            onClick={() => setExpandedCategories(prev => ({ ...prev, [errorCategory]: !prev[errorCategory] }))}
+                            className="w-full bg-amber-50/80 px-4 py-2 border-b border-amber-100 flex items-center justify-between hover:bg-amber-100/50 transition-colors cursor-pointer text-left"
+                          >
+                            <div className="flex items-center gap-2">
+                              {isExpanded ? <ChevronUp className="w-4 h-4 text-amber-500" /> : <ChevronDown className="w-4 h-4 text-amber-500" />}
+                              <AlertTriangle className="w-4 h-4 text-amber-500" />
+                              <h5 className="text-xs font-black text-amber-800 uppercase tracking-wider">
+                                {errorCategory}
+                              </h5>
+                            </div>
+                            <span className="text-[10px] font-bold bg-amber-200 text-amber-800 px-2 rounded-full">
+                              {slides.length > 0 ? `${slides.length} slide${slides.length > 1 ? 's' : ''}` : `${issueList.length} issues`}
+                            </span>
+                          </button>
+                          
+                          {isExpanded && (
+                            <div className="p-4 bg-white text-xs font-medium text-amber-900 leading-relaxed">
+                              <div className="flex flex-col gap-3">
+                                {slides.length > 0 && (
+                                  <div className="flex flex-wrap gap-1.5 items-center">
+                                    {slides.map((slideNum: any) => (
+                                      <span key={slideNum} className="px-2 py-0.5 bg-amber-100 border border-amber-200 rounded text-amber-800 font-bold">
+                                        Slide {slideNum}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                <ul className="list-disc pl-4 space-y-1">
+                                  {issueList.map((item: any, mIdx: number) => (
+                                    <li key={mIdx}>
+                                      {item.slide ? <span className="font-bold mr-1">Slide {item.slide}:</span> : null}
+                                      {item.detail}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : accessibilityDiag ? (
+                  <p className="text-xs text-emerald-600 font-semibold flex items-center gap-1.5">
+                    <Check className="w-3.5 h-3.5" /> No accessibility issues found! Your presentation looks great.
+                  </p>
+                ) : (
+                  <p className="text-xs text-zinc-400 italic">Loading accessibility report...</p>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

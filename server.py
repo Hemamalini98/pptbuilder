@@ -358,18 +358,16 @@ async def extract_crop(
         png_data = pix.tobytes("png")
         doc.close()
         
-        # Save crop image into pdf_extracts subfolder
-        extracts_dir = os.path.join(UPLOAD_DIR, "pdf_extracts")
-        os.makedirs(extracts_dir, exist_ok=True)
-        existing = [f for f in os.listdir(extracts_dir) if f.startswith("crop_") and f.endswith(".png")]
+        # Save crop image into UPLOAD_DIR
+        existing = [f for f in os.listdir(UPLOAD_DIR) if f.startswith("crop_") and f.endswith(".png")]
         idx = len(existing) + 1
         filename = f"crop_p{page+1}_{idx:03d}.png"
-        filepath = os.path.join(extracts_dir, filename)
+        filepath = os.path.join(UPLOAD_DIR, filename)
         
         with open(filepath, "wb") as f:
             f.write(png_data)
             
-        return {"filename": filename, "url": f"/api/media/pdf_extracts/{filename}", "page": page + 1}
+        return {"filename": filename, "url": f"/api/media/{filename}", "page": page + 1}
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -486,6 +484,18 @@ async def get_figure_diagnostics():
         return {"ok": True, "missing": missing, "unplaced": unplaced}
     except Exception as e:
         return {"ok": False, "detail": str(e), "missing": [], "unplaced": []}
+
+@app.get("/api/accessibility-report")
+async def get_accessibility_report():
+    output_path = state.get("styled_pptx") or os.path.join(UPLOAD_DIR, "styled_output.pptx")
+    if not os.path.exists(output_path):
+        return {"ok": False, "issues": []}
+    try:
+        from accessibility import check_ppt_accessibility
+        issues = check_ppt_accessibility(output_path)
+        return {"ok": True, "issues": issues}
+    except Exception as e:
+        return {"ok": False, "detail": str(e), "issues": []}
 
 # Static media serving for images
 app.mount("/api/media", StaticFiles(directory=UPLOAD_DIR), name="media")
