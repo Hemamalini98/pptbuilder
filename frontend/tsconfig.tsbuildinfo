@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/store.ts","./src/components/step1template.tsx","./src/components/step2upload.tsx","./src/components/step3figures.tsx","./src/components/step4mapping.tsx","./src/components/step5export.tsx"],"version":"5.9.3"}
