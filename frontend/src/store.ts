@@ -48,8 +48,9 @@ export interface SlideData {
 export interface StylesData {
   slide_width_pt: number;
   slide_height_pt: number;
-  layouts: Record<string, any>;
+  slideLayouts: any[];
   slides: SlideData[];
+  theme?: any;
 }
 
 export interface Figure {

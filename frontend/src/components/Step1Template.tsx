@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
-import { Upload, ChevronDown, Check, Layout, Palette, FileText } from 'lucide-react';
+import { Upload, ChevronDown, Check, Layout, FileText, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 export const Step1Template: React.FC = () => {
@@ -64,21 +64,19 @@ export const Step1Template: React.FC = () => {
   };
 
   // Extract layout colors or compute statistics
-  const layoutsCount = templateStyles?.layouts ? Object.keys(templateStyles.layouts).length : 0;
+  const layoutsCount = templateStyles?.slideLayouts ? templateStyles.slideLayouts.length : 0;
   
   // Calculate average shapes per layout
   let placeholderCount = 0;
-  if (templateStyles?.layouts) {
-    Object.values(templateStyles.layouts).forEach((layout: any) => {
-      if (Array.isArray(layout)) {
-        placeholderCount += layout.length;
+  if (templateStyles?.slideLayouts) {
+    templateStyles.slideLayouts.forEach((layout: any) => {
+      if (layout.placeholders && Array.isArray(layout.placeholders)) {
+        placeholderCount += layout.placeholders.length;
       }
     });
   }
 
-  // Predefined colors for template theme style (cream background, navy primary, amber accent)
-  const primaryColor = "oklch(0.28 0.04 255)";
-  const accentColor = "oklch(0.78 0.15 65)";
+
 
   return (
     <div className="space-y-3 max-w-7xl mx-auto">
@@ -97,13 +95,30 @@ export const Step1Template: React.FC = () => {
             </label>
             
             <div className="relative">
-              <button
-                onClick={() => setDropdownOpen(!dropdownOpen)}
-                className="w-full flex items-center justify-between px-4 py-3 bg-[var(--color-cream)] border border-[var(--color-border)] rounded-[var(--radius-custom)] focus:outline-none focus:ring-2 focus:ring-[var(--color-amber)] text-sm font-medium transition-all"
-              >
-                <span>{selectedTemplate ? selectedTemplate.name : "Select a template..."}</span>
-                <ChevronDown className="w-4 h-4 text-[var(--color-muted)]" />
-              </button>
+              <div className="relative flex items-center">
+                <button
+                  type="button"
+                  onClick={() => setDropdownOpen(!dropdownOpen)}
+                  className="w-full flex items-center justify-between pl-4 pr-10 py-3 bg-[var(--color-cream)] border border-[var(--color-border)] rounded-[var(--radius-custom)] focus:outline-none focus:ring-2 focus:ring-[var(--color-amber)] text-sm font-medium transition-all cursor-pointer text-left"
+                >
+                  <span className="truncate">{selectedTemplate ? selectedTemplate.name : "Select a template..."}</span>
+                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-muted)] pointer-events-none" />
+                </button>
+                {selectedTemplate && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // Clear template selection in store
+                      useStore.setState({ selectedTemplate: null, templateStyles: null });
+                    }}
+                    className="absolute right-8 top-1/2 -translate-y-1/2 text-[var(--color-muted)] hover:text-rose-500 transition-colors p-1 cursor-pointer flex items-center justify-center"
+                    title="Clear selection"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
 
               {dropdownOpen && (
                 <div className="absolute z-10 w-full mt-2 bg-white border border-[var(--color-border)] rounded-[var(--radius-custom)] shadow-lg max-h-60 overflow-y-auto">
@@ -134,54 +149,58 @@ export const Step1Template: React.FC = () => {
             </div>
           </div>
 
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center" aria-hidden="true">
-              <div className="w-full border-t border-[var(--color-border)]"></div>
-            </div>
-            <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-white px-2 text-[var(--color-muted)] font-medium">Or upload new master</span>
-            </div>
-          </div>
+          {!selectedTemplate && (
+            <>
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                  <div className="w-full border-t border-[var(--color-border)]"></div>
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-white px-2 text-[var(--color-muted)] font-medium">Or upload new master</span>
+                </div>
+              </div>
 
-          {/* Drag & Drop Area */}
-          <div
-            onDragEnter={handleDrag}
-            onDragOver={handleDrag}
-            onDragLeave={handleDrag}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
-            className={`dashed-drop flex flex-col items-center justify-center p-8 text-center cursor-pointer min-h-[180px] ${
-              isDragActive ? "drag-active border-[var(--color-amber)] bg-amber-50/10" : ""
-            }`}
-          >
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileInput}
-              accept=".pptx"
-              className="hidden"
-            />
-            {templateLoading ? (
-              <div className="space-y-3">
-                <div className="w-8 h-8 border-4 border-[var(--color-amber)] border-t-transparent rounded-full animate-spin mx-auto"></div>
-                <p className="text-sm font-semibold text-[var(--color-navy)]">Parsing slides styling...</p>
+              {/* Drag & Drop Area */}
+              <div
+                onDragEnter={handleDrag}
+                onDragOver={handleDrag}
+                onDragLeave={handleDrag}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+                className={`dashed-drop flex flex-col items-center justify-center p-8 text-center cursor-pointer min-h-[180px] ${
+                  isDragActive ? "drag-active border-[var(--color-amber)] bg-amber-50/10" : ""
+                }`}
+              >
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileInput}
+                  accept=".pptx"
+                  className="hidden"
+                />
+                {templateLoading ? (
+                  <div className="space-y-3">
+                    <div className="w-8 h-8 border-4 border-[var(--color-amber)] border-t-transparent rounded-full animate-spin mx-auto"></div>
+                    <p className="text-sm font-semibold text-[var(--color-navy)]">Parsing slides styling...</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="w-12 h-12 bg-cream rounded-full flex items-center justify-center mx-auto text-[var(--color-navy)]">
+                      <Upload className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-[var(--color-navy)]">
+                        Drag and drop your template `.pptx`
+                      </p>
+                      <p className="text-xs text-[var(--color-muted)] mt-1">
+                        PowerPoint Presentation up to 50MB
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="space-y-4">
-                <div className="w-12 h-12 bg-cream rounded-full flex items-center justify-center mx-auto text-[var(--color-navy)]">
-                  <Upload className="w-6 h-6" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-[var(--color-navy)]">
-                    Drag and drop your template `.pptx`
-                  </p>
-                  <p className="text-xs text-[var(--color-muted)] mt-1">
-                    PowerPoint Presentation up to 50MB
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
+            </>
+          )}
         </div>
 
         {/* Right Side: Preview Card */}
@@ -218,25 +237,7 @@ export const Step1Template: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <span className="text-xs font-semibold text-[var(--color-muted)] flex items-center space-x-1">
-                    <Palette className="w-3.5 h-3.5" />
-                    <span>Primary Palette</span>
-                  </span>
-                  <div className="flex items-center space-x-2">
-                    <div
-                      className="w-8 h-8 rounded-full border border-black/10"
-                      style={{ backgroundColor: primaryColor }}
-                      title="Primary Navy"
-                    />
-                    <div
-                      className="w-8 h-8 rounded-full border border-black/10"
-                      style={{ backgroundColor: accentColor }}
-                      title="Accent Amber"
-                    />
-                    <div className="w-8 h-8 rounded-full border border-black/10 bg-white" title="Base Light" />
-                  </div>
-                </div>
+
               </div>
             ) : (
               <div className="flex flex-col items-center justify-center py-12 text-center space-y-3">

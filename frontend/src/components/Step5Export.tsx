@@ -11,7 +11,8 @@ export const Step5Export: React.FC = () => {
   } = useStore();
 
   const [reportTab, setReportTab] = useState<'style' | 'figures' | 'accessibility'>('style');
-  const [expandedCategories, setExpandedCategories] = useState<Record<string, boolean>>({});
+  const [expandedSubCategories, setExpandedSubCategories] = useState<Record<string, boolean>>({});
+  const [selectedSeverity, setSelectedSeverity] = useState<string>('Error');
   const [figureDiag, setFigureDiag] = useState<{ missing: string[]; unplaced: string[] } | null>(null);
   const [accessibilityDiag, setAccessibilityDiag] = useState<{ issues: string[] } | null>(null);
 
@@ -47,7 +48,7 @@ export const Step5Export: React.FC = () => {
           .map((para: any) => para.runs ? para.runs.map((r: any) => r.sampleText || '').join('') : '')
           .join(' ')
           .trim();
-        const isFigRef = /(figure|table|chart)\s+\d+/i.test(text) || /insert\s+(figure|table|chart|image)/i.test(text);
+        const isFigRef = /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(text) || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(text);
         if (isFigRef) {
           emptyPlaceholdersCount++;
         }
@@ -212,11 +213,11 @@ export const Step5Export: React.FC = () => {
                     .join(' ')
                     .trim();
                   
-                  const match = text.match(/(figure|table|chart)\s+[\d.]+/i) || text.match(/insert\s+(figure|table|chart|image)\s+[\d.]+/i);
+                  const match = text.match(/\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i) || text.match(/\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i);
                   if (match) {
                     missingRefs.push(match[0].toUpperCase());
                   } else {
-                    const isFigRef = /(figure|table|chart)\s+\d+/i.test(text) || /insert\s+(figure|table|chart|image)/i.test(text);
+                    const isFigRef = /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(text) || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(text);
                     if (isFigRef) {
                       missingRefs.push(text.length > 25 ? text.substring(0, 25) + '...' : text);
                     }
@@ -370,15 +371,65 @@ export const Step5Export: React.FC = () => {
 
         {/* Accessibility Report Tab */}
         {reportTab === 'accessibility' && (() => {
-          // Group by Error Category using structured JSON
-          const groupedIssues = (accessibilityDiag?.issues || []).reduce((acc: Record<string, any[]>, issue: any) => {
+          // Group by Severity, then Category using nested structured JSON
+          const groupedIssues = (accessibilityDiag?.issues || []).reduce((acc: Record<string, Record<string, any[]>>, issue: any) => {
+            const severity = issue.severity || 'Warning';
             const category = issue.category || 'General Issues';
-            acc[category] = acc[category] || [];
-            acc[category].push({ slide: issue.slide, detail: issue.detail });
+            acc[severity] = acc[severity] || {};
+            acc[severity][category] = acc[severity][category] || [];
+            acc[severity][category].push({ slide: issue.slide, detail: issue.detail });
             return acc;
           }, {});
 
-          const hasIssues = Object.keys(groupedIssues).length > 0;
+          const severities = ['Error', 'Warning', 'Tip'];
+          
+          // Pre-calculate counts for each severity
+          const counts = severities.reduce((acc, sev) => {
+            const categories = groupedIssues[sev] || {};
+            const totalIssues = Object.values(categories).reduce((sum, list) => sum + list.length, 0);
+            const uniqueSlides = Array.from(
+              new Set(
+                Object.values(categories)
+                  .flatMap((list) => list.map((i) => i.slide))
+                  .filter((s) => s != null)
+              )
+            ).length;
+            acc[sev] = { totalIssues, uniqueSlides };
+            return acc;
+          }, {} as Record<string, { totalIssues: number, uniqueSlides: number }>);
+
+          const cardStyles: Record<string, { activeBorder: string, border: string, bg: string, hoverBg: string, activeBg: string, text: string, iconColor: string, title: string }> = {
+            'Error': {
+              activeBorder: 'border-rose-500 ring-2 ring-rose-500/20',
+              border: 'border-rose-100',
+              bg: 'bg-rose-50/20',
+              hoverBg: 'hover:bg-rose-50/50',
+              activeBg: 'bg-rose-50/60',
+              text: 'text-rose-800',
+              iconColor: 'text-rose-500',
+              title: 'Errors'
+            },
+            'Warning': {
+              activeBorder: 'border-amber-500 ring-2 ring-amber-500/20',
+              border: 'border-amber-100',
+              bg: 'bg-amber-50/20',
+              hoverBg: 'hover:bg-amber-50/50',
+              activeBg: 'bg-amber-50/60',
+              text: 'text-amber-800',
+              iconColor: 'text-amber-500',
+              title: 'Warnings'
+            },
+            'Tip': {
+              activeBorder: 'border-blue-500 ring-2 ring-blue-500/20',
+              border: 'border-blue-100',
+              bg: 'bg-blue-50/20',
+              hoverBg: 'hover:bg-blue-50/50',
+              activeBg: 'bg-blue-50/60',
+              text: 'text-blue-800',
+              iconColor: 'text-blue-500',
+              title: 'Tips'
+            }
+          };
 
           return (
             <div className="p-6 space-y-6 max-h-[620px] overflow-y-auto">
@@ -386,67 +437,99 @@ export const Step5Export: React.FC = () => {
                 <h4 className="flex items-center gap-2 text-sm font-black text-amber-600 uppercase tracking-wider mb-4">
                   <Activity className="w-4 h-4" />
                   Accessibility Issues Found
-                  <span className="text-[10px] font-semibold text-amber-400 normal-case tracking-normal">(based on minimum font sizes, alt text, empty shapes)</span>
                 </h4>
-                {hasIssues ? (
-                  <div className="space-y-4">
-                    {Object.entries(groupedIssues).map(([errorCategory, issueList], idx) => {
-                      // Get unique slides for this category
-                      const slides = Array.from(new Set(issueList.map(i => i.slide).filter(s => s != null))).sort((a: any, b: any) => a - b);
-                      const isExpanded = expandedCategories[errorCategory] || false;
-                      
-                      return (
-                        <div key={idx} className="border border-amber-200 rounded-md overflow-hidden bg-white shadow-sm">
-                          <button 
-                            onClick={() => setExpandedCategories(prev => ({ ...prev, [errorCategory]: !prev[errorCategory] }))}
-                            className="w-full bg-amber-50/80 px-4 py-2 border-b border-amber-100 flex items-center justify-between hover:bg-amber-100/50 transition-colors cursor-pointer text-left"
-                          >
-                            <div className="flex items-center gap-2">
-                              {isExpanded ? <ChevronUp className="w-4 h-4 text-amber-500" /> : <ChevronDown className="w-4 h-4 text-amber-500" />}
-                              <AlertTriangle className="w-4 h-4 text-amber-500" />
-                              <h5 className="text-xs font-black text-amber-800 uppercase tracking-wider">
-                                {errorCategory}
-                              </h5>
-                            </div>
-                            <span className="text-[10px] font-bold bg-amber-200 text-amber-800 px-2 rounded-full">
-                              {slides.length > 0 ? `${slides.length} slide${slides.length > 1 ? 's' : ''}` : `${issueList.length} issues`}
-                            </span>
-                          </button>
-                          
-                          {isExpanded && (
-                            <div className="p-4 bg-white text-xs font-medium text-amber-900 leading-relaxed">
-                              <div className="flex flex-col gap-3">
-                                {slides.length > 0 && (
-                                  <div className="flex flex-wrap gap-1.5 items-center">
-                                    {slides.map((slideNum: any) => (
-                                      <span key={slideNum} className="px-2 py-0.5 bg-amber-100 border border-amber-200 rounded text-amber-800 font-bold">
-                                        Slide {slideNum}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
+
+                {/* Horizontal Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+                  {severities.map((sev) => {
+                    const isActive = selectedSeverity === sev;
+                    const style = cardStyles[sev];
+                    const count = counts[sev];
+
+                    return (
+                      <button
+                        key={sev}
+                        type="button"
+                        onClick={() => setSelectedSeverity(sev)}
+                        className={`p-4 border rounded-lg text-left transition-all cursor-pointer flex flex-col justify-between h-24 ${
+                          isActive 
+                            ? `${style.activeBorder} ${style.activeBg}` 
+                            : `border-zinc-200 bg-white ${style.hoverBg}`
+                        }`}
+                      >
+                        <div className="flex items-center justify-between w-full">
+                          <span className={`text-[11px] font-black uppercase tracking-wider ${style.text}`}>
+                            {style.title}
+                          </span>
+                          <AlertTriangle className={`w-4 h-4 ${style.iconColor}`} />
+                        </div>
+                        <div className="mt-2">
+                          <span className="text-xl font-black text-zinc-800 block leading-none">
+                            {count.totalIssues}
+                          </span>
+                          <span className="text-[10px] text-zinc-400 font-semibold block mt-1">
+                            {count.uniqueSlides > 0 ? `on ${count.uniqueSlides} slide${count.uniqueSlides > 1 ? 's' : ''}` : 'no issues found'}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Subcategories list for the selected severity card */}
+                {(() => {
+                  const categories = groupedIssues[selectedSeverity] || {};
+                  const categoryEntries = Object.entries(categories);
+
+                  if (categoryEntries.length === 0) {
+                    return (
+                      <div className="text-center py-10 border border-dashed border-zinc-200 rounded-lg bg-zinc-50/50">
+                        <Check className="w-8 h-8 text-emerald-500 mx-auto mb-2" />
+                        <p className="text-xs text-zinc-500 font-bold">No {selectedSeverity.toLowerCase()}s found! Slide content meets standard requirements.</p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="space-y-3 animate-in fade-in duration-200">
+                      {categoryEntries.map(([categoryName, items], cIdx) => {
+                        const subKey = `${selectedSeverity}-${categoryName}`;
+                        const isSubExpanded = expandedSubCategories[subKey] || false;
+
+                        return (
+                          <div key={cIdx} className="border border-zinc-200 rounded-md overflow-hidden bg-white shadow-xs">
+                            <button 
+                              type="button"
+                              onClick={() => setExpandedSubCategories(prev => ({ ...prev, [subKey]: !prev[subKey] }))}
+                              className="w-full bg-zinc-50/50 px-3.5 py-2.5 border-b border-zinc-100 flex items-center justify-between hover:bg-zinc-100/30 transition-colors cursor-pointer text-left"
+                            >
+                              <div className="flex items-center gap-1.5">
+                                {isSubExpanded ? <ChevronUp className="w-3.5 h-3.5 text-zinc-400" /> : <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />}
+                                <span className="text-[11px] font-bold text-zinc-700 uppercase tracking-wide">{categoryName}</span>
+                              </div>
+                              <span className="text-[9px] font-bold bg-zinc-200 text-zinc-750 px-2 rounded-full">
+                                {items.length} issue{items.length > 1 ? 's' : ''}
+                              </span>
+                            </button>
+
+                            {isSubExpanded && (
+                              <div className="p-3 bg-white border-t border-zinc-50">
                                 <ul className="list-disc pl-4 space-y-1">
-                                  {issueList.map((item: any, mIdx: number) => (
-                                    <li key={mIdx}>
+                                  {items.map((item: any, mIdx: number) => (
+                                    <li key={mIdx} className="text-zinc-650 text-[11px]">
                                       {item.slide ? <span className="font-bold mr-1">Slide {item.slide}:</span> : null}
                                       {item.detail}
                                     </li>
                                   ))}
                                 </ul>
                               </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : accessibilityDiag ? (
-                  <p className="text-xs text-emerald-600 font-semibold flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5" /> No accessibility issues found! Your presentation looks great.
-                  </p>
-                ) : (
-                  <p className="text-xs text-zinc-400 italic">Loading accessibility report...</p>
-                )}
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           );
