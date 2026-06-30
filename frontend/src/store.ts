@@ -80,6 +80,12 @@ interface DeckforgeState {
   selectedTemplate: StoredTemplate | null;
   templateStyles: StylesData | null;
   templateLoading: boolean;
+  customerName: string;
+  projectName: string;
+  setCustomerName: (name: string) => void;
+  setProjectName: (name: string) => void;
+  customers: string[];
+  fetchCustomers: () => Promise<void>;
   
   // Step 2: Source Uploads
   inputPptName: string | null;
@@ -100,6 +106,8 @@ interface DeckforgeState {
   slides: SlideData[] | null;
   currentSlideIndex: number;
   setCurrentSlideIndex: (idx: number) => void;
+  focusedShapeIndex: number | null;
+  setFocusedShapeIndex: (idx: number | null) => void;
   placeFigureOnShape: (slideIndex: number, shapeIndex: number, figureId: string) => Promise<void>;
   placeFigureAtCoordinates: (slideIndex: number, figureId: string, x_pt: number, y_pt: number, w_pt: number, h_pt: number) => Promise<void>;
   removeFigureFromShape: (slideIndex: number, shapeIndex: number) => Promise<void>;
@@ -123,6 +131,11 @@ export const useStore = create<DeckforgeState>((set, get) => ({
   selectedTemplate: null,
   templateStyles: null,
   templateLoading: false,
+  customerName: '',
+  projectName: '',
+  setCustomerName: (customerName) => set({ customerName }),
+  setProjectName: (projectName) => set({ projectName }),
+  customers: [],
 
   // Step 2
   inputPptName: null,
@@ -139,6 +152,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
   // Step 4
   slides: null,
   currentSlideIndex: 0,
+  focusedShapeIndex: null,
 
   fetchTemplates: async () => {
     try {
@@ -149,6 +163,18 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       }
     } catch (err) {
       console.error('Failed to fetch templates:', err);
+    }
+  },
+
+  fetchCustomers: async () => {
+    try {
+      const res = await fetch('/api/customers');
+      const data = await res.json();
+      if (data.ok) {
+        set({ customers: data.customers });
+      }
+    } catch (err) {
+      console.error('Failed to fetch customers:', err);
     }
   },
 
@@ -424,6 +450,8 @@ export const useStore = create<DeckforgeState>((set, get) => ({
 
   setCurrentSlideIndex: (currentSlideIndex) => set({ currentSlideIndex }),
 
+  setFocusedShapeIndex: (focusedShapeIndex) => set({ focusedShapeIndex }),
+
   resetSession: async () => {
     // Clear uploaded files on the server first
     try {
@@ -444,6 +472,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       figures: [],
       slides: null,
       currentSlideIndex: 0,
+      focusedShapeIndex: null,
+      customerName: '',
+      projectName: '',
     });
   },
 }));

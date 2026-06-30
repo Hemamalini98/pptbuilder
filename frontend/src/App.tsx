@@ -28,7 +28,7 @@ function App() {
         <div className="flex items-center space-x-3 flex-shrink-0">
           <img src={logo} alt="S4Carlisle Logo" className="h-9 object-contain" />
           <div className="border-l border-zinc-200 pl-3">
-            <h1 className="text-[11px] font-black tracking-wider text-[var(--color-navy)] uppercase">SlideFormatter</h1>
+            <h1 className="text-base font-black tracking-wider text-[var(--color-navy)] uppercase">SlideFormatter</h1>
           </div>
         </div>
 

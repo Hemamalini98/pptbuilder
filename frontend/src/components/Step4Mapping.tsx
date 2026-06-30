@@ -7,7 +7,9 @@ export const Step4Mapping: React.FC = () => {
     slides,
     currentSlideIndex,
     setCurrentSlideIndex,
-    setStep
+    setStep,
+    focusedShapeIndex,
+    setFocusedShapeIndex
   } = useStore();
 
   const canvasContainerRef = useRef<HTMLDivElement>(null);
@@ -25,7 +27,7 @@ export const Step4Mapping: React.FC = () => {
 
   const getChecklistItems = (slide: any) => {
     if (!slide?.shapes) return [];
-    const items: { label: string; done: boolean; detail?: string }[] = [];
+    const items: { label: string; done: boolean; detail?: string; shapeIndex?: number }[] = [];
     slide.shapes.forEach((shape: any) => {
       const text = (shape.textBody?.paragraphs || [])
         .map((para: any) => para.runs ? para.runs.map((r: any) => r.sampleText || '').join('') : '')
@@ -37,18 +39,36 @@ export const Step4Mapping: React.FC = () => {
         items.push({
           label: `Mapped Figure / Table`,
           done: true,
-          detail: fileName
+          detail: fileName,
+          shapeIndex: shape.index
         });
       } else if (isFigRef) {
         items.push({
           label: text.length > 40 ? text.substring(0, 40) + '...' : text,
           done: false,
-          detail: 'Placeholder text not replaced'
+          detail: 'Placeholder text not replaced',
+          shapeIndex: shape.index
         });
       }
     });
     return items;
   };
+
+  const getShapeIndexForPlaceholderIdx = (idx: number) => {
+    if (!currentSlide) return undefined;
+    const match = currentSlide.shapes.find(s => s.placeholder?.idx === idx);
+    return match?.index;
+  };
+
+  useEffect(() => {
+    if (focusedShapeIndex === null) return;
+    setShowModifications(true);
+    // Auto-clear the highlight after 4 seconds so it doesn't distract forever
+    const timer = setTimeout(() => {
+      setFocusedShapeIndex(null);
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [focusedShapeIndex, setFocusedShapeIndex]);
 
   useEffect(() => {
     fetch('/api/report-data')
@@ -139,15 +159,23 @@ export const Step4Mapping: React.FC = () => {
           const hasFill = shape.fill && shape.fill !== 'none';
           const bgStyle = hasFill ? { backgroundColor: shape.fill } : {};
 
+          const isFocused = focusedShapeIndex === shape.index;
           return (
             <div
               key={shape.index}
-              className={`absolute transition-all select-none overflow-hidden placeholder-box ${isImagePlaceholder
-                ? shape.imageUrl
-                  ? "border border-emerald-400 bg-emerald-50/5 z-20"
-                  : "border-2 border-dashed border-[var(--color-amber)] bg-amber-50/5 z-20"
-                : "border border-transparent z-10"
-                }`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setFocusedShapeIndex(shape.index);
+              }}
+              className={`absolute transition-all select-none overflow-hidden placeholder-box cursor-pointer ${
+                isFocused
+                  ? "ring-4 ring-amber-400 z-50 scale-[1.03] shadow-[0_0_20px_#f59e0b] animate-pulse border-amber-500"
+                  : isImagePlaceholder
+                  ? shape.imageUrl
+                    ? "border border-emerald-400 bg-emerald-50/5 z-20 hover:border-emerald-500 hover:bg-emerald-50/10"
+                    : "border-2 border-dashed border-[var(--color-amber)] bg-amber-50/5 z-20 hover:border-amber-500"
+                  : "border border-transparent z-10 hover:border-zinc-300"
+              }`}
               style={{
                 left,
                 top,
@@ -397,7 +425,13 @@ export const Step4Mapping: React.FC = () => {
                       );
                     }
                     return checklist.map((item, idx) => (
-                      <div key={idx} className="flex items-start justify-between text-[10px] py-1 border-b border-zinc-50 last:border-0">
+                      <div
+                        key={idx}
+                        onClick={() => item.shapeIndex !== undefined && setFocusedShapeIndex(item.shapeIndex)}
+                        className={`flex items-start justify-between text-[10px] py-1 border-b border-zinc-50 last:border-0 cursor-pointer p-1 rounded hover:bg-zinc-100/50 transition-colors ${
+                          item.shapeIndex !== undefined && focusedShapeIndex === item.shapeIndex ? 'bg-amber-100/50 border-l-2 border-amber-500 pl-1.5 font-semibold' : ''
+                        }`}
+                      >
                         <div className="flex-1 min-w-0 pr-2">
                           <span className="font-semibold text-zinc-700 block truncate">{item.label}</span>
                           {item.detail && <span className="text-[9px] text-zinc-400 block truncate">{item.detail}</span>}
@@ -435,10 +469,14 @@ export const Step4Mapping: React.FC = () => {
                       .map((para: any) => para.runs ? para.runs.map((r: any) => r.sampleText || '').join('') : '')
                       .join(' ')
                       .trim();
+                    const isFocused = focusedShapeIndex === shape.index;
                     return (
                       <div
                         key={shape.index}
-                        className="bg-rose-50 border-l-4 border-rose-500 p-2.5 rounded shadow-xs text-left"
+                        onClick={() => setFocusedShapeIndex(shape.index)}
+                        className={`bg-rose-50 border-l-4 border-rose-500 p-2.5 rounded shadow-xs text-left cursor-pointer transition-all hover:bg-rose-100/50 ${
+                          isFocused ? 'ring-2 ring-rose-400 ring-offset-1 bg-rose-100/40' : ''
+                        }`}
                       >
                         <div className="flex items-center space-x-1.5 mb-1 text-rose-800">
                           <AlertTriangle className="w-3.5 h-3.5 text-rose-500 flex-shrink-0" />
@@ -461,31 +499,41 @@ export const Step4Mapping: React.FC = () => {
               {(() => {
                 const currentSlideChanges = reportData.find((item) => item.slide === currentSlideIndex + 1);
                 return currentSlideChanges && currentSlideChanges.placeholders.length > 0 ? (
-                  currentSlideChanges.placeholders.map((ph: any) => (
-                    <div key={ph.idx} className="space-y-1.5 text-left border-b border-[var(--color-border)] last:border-0 pb-3 mb-3 last:pb-0 last:mb-0">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-[9px] font-bold bg-[var(--color-navy)] text-white px-1.5 py-0.5 rounded uppercase tracking-wider">
-                          {ph.type.replace(/ \(\d+\)/, '')}
-                        </span>
-                        <span className="text-[10px] text-[var(--color-muted)] font-semibold truncate block max-w-[140px]" title={ph.name}>{ph.name}</span>
-                      </div>
-                      {ph.paras.map((p: any, pIdx: number) => (
-                        <div key={pIdx} className="pl-2 border-l-2 border-[var(--color-border)] ml-1 space-y-1">
-                          <p className="text-[10px] font-medium text-zinc-500 italic">"{p.text.substring(0, 50)}..."</p>
-                          <div className="flex flex-col gap-1.5 mt-1">
-                            {p.changes.map((c: any, cIdx: number) => (
-                              <span key={cIdx} className="text-[9px] bg-white border border-[var(--color-border)] text-zinc-700 px-2 py-0.5 rounded flex flex-wrap items-center font-semibold">
-                                <span className="text-[8px] uppercase tracking-wider text-[var(--color-amber)] mr-1">{c.prop}:</span>
-                                <span className="line-through text-zinc-400 mr-1">{c.before}</span>
-                                <span className="text-zinc-300 mr-1">→</span>
-                                <span className="text-emerald-700 font-black">{c.after}</span>
-                              </span>
-                            ))}
-                          </div>
+                  currentSlideChanges.placeholders.map((ph: any) => {
+                    const matchedShapeIndex = getShapeIndexForPlaceholderIdx(ph.idx);
+                    const isFocused = matchedShapeIndex !== undefined && focusedShapeIndex === matchedShapeIndex;
+                    return (
+                      <div
+                        key={ph.idx}
+                        onClick={() => matchedShapeIndex !== undefined && setFocusedShapeIndex(matchedShapeIndex)}
+                        className={`space-y-1.5 text-left border-b border-[var(--color-border)] last:border-0 pb-3 mb-3 last:pb-0 last:mb-0 cursor-pointer p-1.5 rounded hover:bg-zinc-100/50 transition-all ${
+                          isFocused ? 'bg-amber-55/40 border-l-2 border-amber-500 pl-2 font-semibold' : ''
+                        }`}
+                      >
+                        <div className="flex items-center space-x-2">
+                          <span className="text-[9px] font-bold bg-[var(--color-navy)] text-white px-1.5 py-0.5 rounded uppercase tracking-wider">
+                            {ph.type.replace(/ \(\d+\)/, '')}
+                          </span>
+                          <span className="text-[10px] text-[var(--color-muted)] font-semibold truncate block max-w-[140px]" title={ph.name}>{ph.name}</span>
                         </div>
-                      ))}
-                    </div>
-                  ))
+                        {ph.paras.map((p: any, pIdx: number) => (
+                          <div key={pIdx} className="pl-2 border-l-2 border-[var(--color-border)] ml-1 space-y-1">
+                            <p className="text-[10px] font-medium text-zinc-500 italic">"{p.text.substring(0, 50)}..."</p>
+                            <div className="flex flex-col gap-1.5 mt-1">
+                              {p.changes.map((c: any, cIdx: number) => (
+                                <span key={cIdx} className="text-[9px] bg-white border border-[var(--color-border)] text-zinc-700 px-2 py-0.5 rounded flex flex-wrap items-center font-semibold">
+                                  <span className="text-[8px] uppercase tracking-wider text-[var(--color-amber)] mr-1">{c.prop}:</span>
+                                  <span className="line-through text-zinc-400 mr-1">{c.before}</span>
+                                  <span className="text-zinc-300 mr-1">→</span>
+                                  <span className="text-emerald-700 font-black">{c.after}</span>
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })
                 ) : (
                   <div className="text-[11px] text-[var(--color-muted)] italic flex flex-col items-center justify-center h-full py-8 text-center">
                     <span>✨ Slide layout formatting matches the template master styles exactly.</span>

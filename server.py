@@ -497,6 +497,16 @@ async def get_accessibility_report():
     except Exception as e:
         return {"ok": False, "detail": str(e), "issues": []}
 
+@app.get("/api/customers")
+async def get_customers():
+    try:
+        import json
+        with open("customers.json", "r") as f:
+            data = json.load(f)
+        return {"ok": True, "customers": data}
+    except Exception as e:
+        return {"ok": False, "detail": str(e), "customers": []}
+
 # Static media serving for images
 app.mount("/api/media", StaticFiles(directory=UPLOAD_DIR), name="media")
 

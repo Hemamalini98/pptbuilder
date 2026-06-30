@@ -408,7 +408,7 @@ export const Step3Figures: React.FC = () => {
         </div>
 
         {/* Page Area */}
-        <div className="flex-1 overflow-auto bg-[#374151] p-5 flex items-center justify-center min-h-0 page-area" ref={containerRef}>
+        <div className="flex-1 overflow-auto bg-[#374151] p-5 flex min-h-0 page-area" ref={containerRef}>
           {loading && (
             <div className="absolute inset-0 bg-[#0f172a]/75 flex items-center justify-center z-10 backdrop-blur-xs">
               <Loader2 className="w-8 h-8 text-[#0284c7] animate-spin" />
@@ -419,7 +419,7 @@ export const Step3Figures: React.FC = () => {
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
-            className="relative cursor-crosshair select-none flex-shrink-0 page-wrap"
+            className="relative cursor-crosshair select-none flex-shrink-0 m-auto page-wrap"
           >
             <canvas ref={canvasRef} className="block shadow-2xl bg-white max-w-full" />
             

@@ -7,7 +7,10 @@ export const Step5Export: React.FC = () => {
   const {
     figures,
     slides,
-    resetSession
+    resetSession,
+    setStep,
+    setCurrentSlideIndex,
+    setFocusedShapeIndex
   } = useStore();
 
   const [reportTab, setReportTab] = useState<'style' | 'figures' | 'accessibility'>('style');
@@ -86,6 +89,17 @@ export const Step5Export: React.FC = () => {
     } catch (err) {
       toast.error("Failed to generate mapping file.");
     }
+  };
+
+  const handleNavigateToSlide = (slideIdx: number, shapeIdx?: number) => {
+    setCurrentSlideIndex(slideIdx);
+    if (shapeIdx !== undefined) {
+      setFocusedShapeIndex(shapeIdx);
+    } else {
+      setFocusedShapeIndex(null);
+    }
+    setStep(4);
+    toast.info(`Navigated to Slide ${slideIdx + 1}`);
   };
 
   return (
@@ -200,13 +214,13 @@ export const Step5Export: React.FC = () => {
           </h3>
           <div className="flex-1 overflow-y-auto space-y-2.5 pr-1">
             {slides?.map((slide, idx) => {
-              const missingRefs: string[] = [];
+              const missingRefs: { label: string; shapeIndex: number }[] = [];
               slide.shapes.forEach((s) => {
                 const isPicturePh = ((s.shapeType && (s.shapeType === '13' || s.shapeType.includes('Picture') || s.shapeType.includes('Image'))) ||
                   (s.placeholder?.type && (s.placeholder.type.includes('PICTURE') || s.placeholder.type.includes('BITMAP'))));
                   
                 if (isPicturePh && !s.imageUrl) {
-                  missingRefs.push("Picture Box");
+                  missingRefs.push({ label: "Picture Box", shapeIndex: s.index });
                 } else if (!s.imageUrl) {
                   const text = (s.textBody?.paragraphs || [])
                     .map((para: any) => para.runs ? para.runs.map((r: any) => r.sampleText || '').join('') : '')
@@ -215,11 +229,11 @@ export const Step5Export: React.FC = () => {
                   
                   const match = text.match(/\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i) || text.match(/\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i);
                   if (match) {
-                    missingRefs.push(match[0].toUpperCase());
+                    missingRefs.push({ label: match[0].toUpperCase(), shapeIndex: s.index });
                   } else {
                     const isFigRef = /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(text) || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(text);
                     if (isFigRef) {
-                      missingRefs.push(text.length > 25 ? text.substring(0, 25) + '...' : text);
+                      missingRefs.push({ label: text.length > 25 ? text.substring(0, 25) + '...' : text, shapeIndex: s.index });
                     }
                   }
                 }
@@ -228,16 +242,25 @@ export const Step5Export: React.FC = () => {
               return (
                 <div
                   key={slide.slide_id}
-                  className="flex items-center justify-between p-2 border border-[var(--color-border)] rounded-[var(--radius-custom)] bg-white hover:border-zinc-300 transition-all gap-2"
+                  onClick={() => handleNavigateToSlide(idx)}
+                  className="flex items-center justify-between p-2 border border-[var(--color-border)] rounded-[var(--radius-custom)] bg-white hover:border-amber-400 hover:bg-amber-50/10 cursor-pointer transition-all gap-2"
                 >
                   <span className="text-xs font-semibold text-[var(--color-navy)] flex-shrink-0">
                     Slide {idx + 1}
                   </span>
                   {missingRefs.length > 0 ? (
                     <div className="flex flex-col items-end gap-1 flex-1 min-w-0">
-                      {missingRefs.map((ref, rIdx) => (
-                        <span key={rIdx} className="text-[8px] bg-rose-50 border border-rose-200 text-rose-700 px-1.5 py-0.5 rounded font-bold uppercase tracking-wide truncate max-w-full text-right" title={`Missing ${ref}`}>
-                          ⚠️ Missing {ref}
+                      {missingRefs.map((refObj, rIdx) => (
+                        <span
+                          key={rIdx}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleNavigateToSlide(idx, refObj.shapeIndex);
+                          }}
+                          className="text-[8px] bg-rose-50 border border-rose-200 text-rose-700 px-1.5 py-0.5 rounded font-bold uppercase tracking-wide truncate max-w-full text-right hover:bg-rose-100 transition-all cursor-pointer"
+                          title={`Click to focus missing ${refObj.label}`}
+                        >
+                          ⚠️ Missing {refObj.label}
                         </span>
                       ))}
                     </div>
@@ -514,11 +537,22 @@ export const Step5Export: React.FC = () => {
 
                             {isSubExpanded && (
                               <div className="p-3 bg-white border-t border-zinc-50">
-                                <ul className="list-disc pl-4 space-y-1">
+                                <ul className="space-y-1.5 list-none pl-0">
                                   {items.map((item: any, mIdx: number) => (
-                                    <li key={mIdx} className="text-zinc-650 text-[11px]">
-                                      {item.slide ? <span className="font-bold mr-1">Slide {item.slide}:</span> : null}
-                                      {item.detail}
+                                    <li
+                                      key={mIdx}
+                                      onClick={() => item.slide && handleNavigateToSlide(item.slide - 1)}
+                                      className={`text-zinc-650 text-[11px] p-1.5 rounded hover:bg-amber-50 hover:text-amber-900 transition-all ${
+                                        item.slide ? 'cursor-pointer' : ''
+                                      }`}
+                                      title={item.slide ? `Click to inspect Slide ${item.slide}` : undefined}
+                                    >
+                                      {item.slide ? (
+                                        <span className="font-bold mr-1 text-[var(--color-navy)] bg-[var(--color-cream)] px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wide">
+                                          Slide {item.slide}
+                                        </span>
+                                      ) : null}
+                                      <span className="font-medium">{item.detail}</span>
                                     </li>
                                   ))}
                                 </ul>
