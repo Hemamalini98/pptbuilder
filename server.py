@@ -241,14 +241,7 @@ async def process_ppt(payload: dict = None):
         # Save auto inserted list into local variable for returning in the response
         state["auto_inserted_list"] = auto_inserted_list
 
-        # Generate style difference and figure placement diagnostics report
-        try:
-            from report import generate_report
-            report_path = os.path.join(UPLOAD_DIR, "change_report.html")
-            generate_report(state["content_pptx"], output_path, report_path)
-            print("Successfully generated style change report at:", report_path)
-        except Exception as e:
-            print("Failed to generate style change report:", e)
+
         
 
         
@@ -452,12 +445,7 @@ async def download_pptx():
         filename="styled_presentation.pptx"
     )
 
-@app.get("/api/report")
-async def get_change_report():
-    report_path = os.path.join(UPLOAD_DIR, "change_report.html")
-    if not os.path.exists(report_path):
-        raise HTTPException(status_code=404, detail="No style change report generated yet.")
-    return FileResponse(report_path, media_type="text/html")
+
 
 @app.get("/api/report-data")
 async def get_report_data():

@@ -18,6 +18,8 @@ export const Step5Export: React.FC = () => {
   const [selectedSeverity, setSelectedSeverity] = useState<string>('Error');
   const [figureDiag, setFigureDiag] = useState<{ missing: string[]; unplaced: string[] } | null>(null);
   const [accessibilityDiag, setAccessibilityDiag] = useState<{ issues: string[] } | null>(null);
+  const [reportData, setReportData] = useState<any[]>([]);
+  const [activeFilter, setActiveFilter] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/figure-diagnostics')
@@ -28,6 +30,11 @@ export const Step5Export: React.FC = () => {
     fetch('/api/accessibility-report')
       .then(r => r.json())
       .then(d => { if (d.ok) setAccessibilityDiag({ issues: d.issues }); })
+      .catch(() => {});
+
+    fetch('/api/report-data')
+      .then(r => r.json())
+      .then(d => { if (d.ok) setReportData(d.changes); })
       .catch(() => {});
   }, []);
 
@@ -327,15 +334,211 @@ export const Step5Export: React.FC = () => {
         </div>
 
         {/* Style Report Tab */}
-        {reportTab === 'style' && (
-          <div className="w-full h-[620px]">
-            <iframe
-              src="/api/report"
-              title="Style Difference Report"
-              className="w-full h-full border-none"
-            />
-          </div>
-        )}
+        {reportTab === 'style' && (() => {
+          const TAG_MAP: Record<string, { cls: string, label: string }> = {
+            'Font family': { cls: 'bg-blue-50 text-blue-700 border border-blue-200', label: 'Font' },
+            'Font size': { cls: 'bg-amber-50 text-amber-700 border border-amber-200', label: 'Size' },
+            'Color': { cls: 'bg-purple-50 text-purple-700 border border-purple-200', label: 'Color' },
+            'Bold': { cls: 'bg-gray-50 text-gray-700 border border-gray-200', label: 'Bold' },
+            'Alignment': { cls: 'bg-cyan-50 text-cyan-700 border border-cyan-200', label: 'Align' },
+            'Line spacing': { cls: 'bg-slate-50 text-slate-700 border border-slate-200', label: 'Line Spc' },
+            'Space before': { cls: 'bg-slate-50 text-slate-700 border border-slate-200', label: 'Spc Before' },
+            'Space after': { cls: 'bg-slate-50 text-slate-700 border border-slate-200', label: 'Spc After' }
+          };
+
+          const FILTER_MAP: Record<string, string[]> = {
+            'Font': ['Font family'],
+            'Size': ['Font size'],
+            'Color': ['Color'],
+            'Bold': ['Bold'],
+            'Alignment': ['Alignment'],
+            'Spacing': ['Line spacing', 'Space before', 'Space after']
+          };
+
+          const phLabel = (t: string) => {
+            if (/center.title/i.test(t)) return 'Center Title';
+            if (/subtitle/i.test(t)) return 'Subtitle';
+            if (/title/i.test(t)) return 'Title';
+            if (/body|object|text/i.test(t)) return 'Body/Content';
+            return t;
+          };
+
+          // Calculate stats
+          let totalChanges = 0;
+          const propertiesChanged = new Set<string>();
+          reportData.forEach((s: any) =>
+            s.placeholders.forEach((p: any) =>
+              p.paras.forEach((q: any) => {
+                totalChanges += q.changes.length;
+                q.changes.forEach((c: any) => propertiesChanged.add(c.prop));
+              })
+            )
+          );
+
+          // Filter data
+          const filtered = reportData.map((slide: any) => {
+            if (!activeFilter) return slide;
+            const allowedProps = FILTER_MAP[activeFilter];
+
+            const newPlaceholders = slide.placeholders.map((ph: any) => {
+              const newParas = ph.paras.map((para: any) => {
+                const newChanges = para.changes.filter((c: any) => allowedProps.includes(c.prop));
+                if (newChanges.length > 0) {
+                  return { ...para, changes: newChanges };
+                }
+                return null;
+              }).filter(Boolean);
+
+              if (newParas.length > 0) {
+                return { ...ph, paras: newParas };
+              }
+              return null;
+            }).filter(Boolean);
+
+            if (newPlaceholders.length > 0) {
+              return { ...slide, placeholders: newPlaceholders };
+            }
+            return null;
+          }).filter(Boolean);
+
+          return (
+            <div className="flex flex-col h-[620px] bg-white">
+              {/* Header Stats */}
+              <div className="flex items-center justify-between px-6 py-4 bg-zinc-900 text-white rounded-t-sm shadow-sm">
+                <div>
+                  <h3 className="text-sm font-bold tracking-wide uppercase">Style & Layout Differences</h3>
+                  <div className="text-[10px] text-zinc-400 mt-0.5">Comparing template cascades to content outputs</div>
+                </div>
+                <div className="flex gap-6 text-center">
+                  <div>
+                    <div className="text-lg font-black font-mono leading-none">{reportData.length}</div>
+                    <div className="text-[9px] text-zinc-400 uppercase tracking-wider mt-1">Slides Changed</div>
+                  </div>
+                  <div className="border-r border-zinc-800 h-6 self-center" />
+                  <div>
+                    <div className="text-lg font-black font-mono leading-none">{totalChanges}</div>
+                    <div className="text-[9px] text-zinc-400 uppercase tracking-wider mt-1">Total Diff</div>
+                  </div>
+                  <div className="border-r border-zinc-800 h-6 self-center" />
+                  <div>
+                    <div className="text-lg font-black font-mono leading-none">{propertiesChanged.size}</div>
+                    <div className="text-[9px] text-zinc-400 uppercase tracking-wider mt-1">Props Affected</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Filter Bar */}
+              <div className="flex items-center gap-2 px-6 py-3 border-b border-zinc-200 bg-zinc-50 overflow-x-auto text-xs">
+                <span className="font-bold text-zinc-500 uppercase tracking-wider text-[10px] mr-1">Filter changes:</span>
+                {['Font', 'Size', 'Color', 'Bold', 'Alignment', 'Spacing'].map((filterName) => {
+                  const isActive = activeFilter === filterName;
+                  return (
+                    <button
+                      key={filterName}
+                      onClick={() => setActiveFilter(isActive ? null : filterName)}
+                      className={`px-2.5 py-1 rounded text-xs font-bold transition-all ${
+                        isActive
+                          ? 'bg-zinc-900 text-white shadow-sm'
+                          : 'bg-white border border-zinc-200 text-zinc-600 hover:bg-zinc-100'
+                      }`}
+                    >
+                      {filterName}
+                    </button>
+                  );
+                })}
+                {activeFilter && (
+                  <button
+                    onClick={() => setActiveFilter(null)}
+                    className="ml-auto text-[10px] font-bold text-zinc-400 hover:text-zinc-600 uppercase"
+                  >
+                    Clear Filter
+                  </button>
+                )}
+              </div>
+
+              {/* Content Scrollable List */}
+              <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-zinc-50/50">
+                {filtered.length === 0 ? (
+                  <div className="text-center py-12 text-zinc-400 text-xs italic">
+                    No visual style differences match the selected filter.
+                  </div>
+                ) : (
+                  filtered.map((slide: any) => {
+                    const slideChangesCount = slide.placeholders.reduce(
+                      (acc: number, ph: any) => acc + ph.paras.reduce((pAcc: number, para: any) => pAcc + para.changes.length, 0),
+                      0
+                    );
+
+                    return (
+                      <div key={slide.slide} className="bg-white border border-zinc-200 rounded-md shadow-sm overflow-hidden">
+                        {/* Slide Header */}
+                        <div className="flex items-center justify-between px-4 py-2.5 bg-zinc-900 text-white">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-bold uppercase tracking-wider border border-white/20 rounded px-1.5 py-0.5">
+                              Slide {slide.slide}
+                            </span>
+                            <span className="text-[11px] text-zinc-300">Layout styling cascade updated</span>
+                          </div>
+                          <span className="text-[10px] font-mono text-zinc-400">
+                            {slideChangesCount} change{slideChangesCount !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+
+                        {/* Slide Placeholders */}
+                        {slide.placeholders.map((ph: any, phIdx: number) => (
+                          <div key={phIdx} className="border-t border-zinc-100 first:border-t-0">
+                            <div className="flex items-center gap-2 px-4 py-2 bg-zinc-50/70 border-b border-zinc-100">
+                              <span className="text-[10px] font-extrabold uppercase tracking-wide text-amber-600 bg-amber-50 border border-amber-200/60 rounded px-1.5 py-0.5">
+                                {phLabel(ph.type)}
+                              </span>
+                              <span className="text-[10px] font-mono text-zinc-400">{ph.name}</span>
+                            </div>
+
+                            {/* Paragraphs */}
+                            {ph.paras.map((para: any, paraIdx: number) => (
+                              <div key={paraIdx} className="p-4 border-b border-zinc-50 last:border-b-0">
+                                <div className="text-xs text-zinc-400 italic mb-2 relative pl-3 border-l-2 border-zinc-200">
+                                  {para.text ? `"${para.text}${para.text.length >= 55 ? '...' : ''}"` : '(empty paragraph)'}
+                                </div>
+                                <div className="space-y-1.5">
+                                  {para.changes.map((c: any, cIdx: number) => {
+                                    const tagInfo = TAG_MAP[c.prop] || { cls: 'bg-zinc-50 text-zinc-600 border border-zinc-200', label: c.prop };
+                                    const isColor = c.is_color && c.after && c.after.startsWith('#');
+
+                                    return (
+                                      <div key={cIdx} className="grid grid-cols-[70px_1fr_12px_1fr] gap-2 items-center text-xs">
+                                        <span className={`text-[9px] font-bold uppercase tracking-wider text-center py-0.5 rounded truncate ${tagInfo.cls}`}>
+                                          {tagInfo.label}
+                                        </span>
+                                        <span className="text-zinc-400 line-through truncate flex items-center gap-1">
+                                          {c.is_color && c.before && c.before.startsWith('#') && (
+                                            <span className="w-2.5 h-2.5 rounded-full border border-black/10 flex-shrink-0" style={{ backgroundColor: c.before }} />
+                                          )}
+                                          {c.before || '—'}
+                                        </span>
+                                        <span className="text-zinc-300 font-bold text-center">→</span>
+                                        <span className="text-emerald-600 font-semibold truncate flex items-center gap-1">
+                                          {isColor && (
+                                            <span className="w-2.5 h-2.5 rounded-full border border-black/10 flex-shrink-0" style={{ backgroundColor: c.after }} />
+                                          )}
+                                          {c.after || '—'}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Figure Diagnostics Tab */}
         {reportTab === 'figures' && (
