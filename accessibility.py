@@ -107,6 +107,116 @@ def check_ppt_accessibility(file_path):
                     "detail": f"Media element '{shape.name}' was found. Ensure it has subtitles, closed captions, or a text transcript."
                 })
 
+            # Check text overflow
+            if shape.has_text_frame and shape.text_frame.text.strip():
+                import math
+                tf = shape.text_frame
+                width_pt = shape.width / 12700
+                height_pt = shape.height / 12700
+                
+                # Default margins in EMUs
+                lIns = 10.0
+                rIns = 10.0
+                tIns = 5.0
+                bIns = 5.0
+                bodyPr = tf._txBody.find("{http://schemas.openxmlformats.org/drawingml/2006/main}bodyPr")
+                if bodyPr is not None:
+                    if bodyPr.get("lIns") is not None: lIns = int(bodyPr.get("lIns")) / 12700
+                    if bodyPr.get("rIns") is not None: rIns = int(bodyPr.get("rIns")) / 12700
+                    if bodyPr.get("tIns") is not None: tIns = int(bodyPr.get("tIns")) / 12700
+                    if bodyPr.get("bIns") is not None: bIns = int(bodyPr.get("bIns")) / 12700
+                
+                avail_w = max(50.0, width_pt - lIns - rIns)
+                avail_h = max(20.0, height_pt - tIns - bIns)
+                
+                total_est_h = 0.0
+                for para in tf.paragraphs:
+                    pt_sz = 18.0 # default size
+                    if para.runs:
+                        for r in para.runs:
+                            if r.font.size is not None:
+                                pt_sz = r.font.size.pt
+                                break
+                    elif para.font.size is not None:
+                        pt_sz = para.font.size.pt
+                    
+                    text = para.text
+                    if not text.strip():
+                        continue
+                    
+                    # Estimate lines
+                    char_w = pt_sz * 0.38
+                    est_text_w = len(text) * char_w
+                    lines = max(1.0, math.ceil(est_text_w / avail_w))
+                    
+                    sb = 0.0
+                    sa = 6.0
+                    if para.space_before is not None:
+                        sb = para.space_before.pt
+                    if para.space_after is not None:
+                        sa = para.space_after.pt
+                    
+                    ls = 1.15
+                    if para.line_spacing is not None:
+                        if isinstance(para.line_spacing, float):
+                            ls = para.line_spacing
+                        else:
+                            ls = para.line_spacing.pt / pt_sz
+                    
+                    total_est_h += lines * (pt_sz * ls) + sb + sa
+                
+                # If overflow exceeds by more than 5pt
+                if total_est_h > avail_h + 5.0:
+                    issues.append({
+                        "slide": slide_index,
+                        "category": "Text Overflow",
+                        "severity": "Warning",
+                        "detail": f"Text in '{shape.name}' potentially overflows shape bounds (requires ~{total_est_h:.1f}pt, shape height {height_pt:.1f}pt)."
+                    })
+
+        # Check overlaps between text and image shapes on this slide
+        spatial_shapes = []
+        for shape in slide.shapes:
+            if not shape.width or not shape.height:
+                continue
+            w_pt = shape.width / 12700
+            h_pt = shape.height / 12700
+            # Skip background elements (width or height > 90% of slide dimensions)
+            if w_pt > 864 or h_pt > 486:
+                continue
+            has_text = shape.has_text_frame and shape.text_frame.text.strip()
+            is_pic = (shape.shape_type == 13)
+            if has_text or is_pic:
+                l_pt = shape.left / 12700
+                t_pt = shape.top / 12700
+                spatial_shapes.append({
+                    "name": shape.name,
+                    "box": (l_pt, t_pt, l_pt + w_pt, t_pt + h_pt)
+                })
+
+        for idx1 in range(len(spatial_shapes)):
+            for idx2 in range(idx1 + 1, len(spatial_shapes)):
+                s1 = spatial_shapes[idx1]
+                s2 = spatial_shapes[idx2]
+                box1 = s1["box"]
+                box2 = s2["box"]
+                
+                int_l = max(box1[0], box2[0])
+                int_t = max(box1[1], box2[1])
+                int_r = min(box1[2], box2[2])
+                int_b = min(box1[3], box2[3])
+                
+                if int_r > int_l and int_b > int_t:
+                    overlap_w = int_r - int_l
+                    overlap_h = int_b - int_t
+                    if overlap_w > 15.0 and overlap_h > 15.0:
+                        issues.append({
+                            "slide": slide_index,
+                            "category": "Shape Overlap",
+                            "severity": "Warning",
+                            "detail": f"Shape '{s1['name']}' overlaps with shape '{s2['name']}' by {overlap_w:.1f}pt x {overlap_h:.1f}pt."
+                        })
+
     # Check for duplicate slide titles
     title_map = {}
     for slide_index, slide in enumerate(prs.slides, start=1):

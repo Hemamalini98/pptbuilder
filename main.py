@@ -242,6 +242,13 @@ def extract_shape(shape):
         },
     }
 
+    # Extract rotation (if defined and non-zero)
+    try:
+        if hasattr(shape, "rotation") and shape.rotation:
+            data["rotation"] = shape.rotation
+    except Exception:
+        pass
+
     # Placeholder info
     if shape.is_placeholder:
         ph = shape.placeholder_format

@@ -207,6 +207,8 @@ export const Step4Mapping: React.FC = () => {
                 top,
                 width,
                 height,
+                transform: shape.rotation ? `rotate(${shape.rotation}deg)` : undefined,
+                transformOrigin: shape.rotation ? 'center' : undefined,
                 ...bgStyle,
               }}
             >

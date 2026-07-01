@@ -185,9 +185,12 @@ def apply_para_style(para, style, color_scheme):
                    pPr_el.find(f"{{{A_NS}}}buNone") is not None)
 
     if not has_bu_none:
-        if "marginLeft_pt" in style:
+        if "marginLeft_pt" in style or "indent_pt" in style:
             pPr = _get_or_create_pPr(p_el)
-            pPr.set("marL", str(int(style["marginLeft_pt"] * PT_TO_EMU)))
+            if "marginLeft_pt" in style:
+                pPr.set("marL", str(int(style["marginLeft_pt"] * PT_TO_EMU)))
+            if "indent_pt" in style:
+                pPr.set("indent", str(int(style["indent_pt"] * PT_TO_EMU)))
 
         # Stamp template bullet char/font so the input master's circle bullet
         # is replaced by the template's square (§ in Wingdings), while preserving
@@ -1499,6 +1502,9 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
         # Add decorative shapes (yellow bar, copyright, etc.) from master + layout
         add_decorative_shapes(slide, layout_name, template, color_scheme, template_prs)
 
+        # Collect placeholder indices present on this slide
+        present_indices = {sh.placeholder_format.idx for sh in slide.shapes if sh.is_placeholder and sh.placeholder_format is not None}
+
         for shape in slide.shapes:
             if not shape.is_placeholder or not shape.has_text_frame:
                 continue
@@ -1506,6 +1512,11 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             ph_idx  = shape.placeholder_format.idx
             ph_type = str(shape.placeholder_format.type)
             is_title = any(t in ph_type for t in TITLE_PH_TYPES)
+
+            # If layout is comparison (slideLayout5) and the slide only has a single body content placeholder
+            # at idx 1 (idx 2 is missing), remap idx 1 to 2 so it styles as body content, not column title.
+            if layout_name == "slideLayout5" and ph_idx == 1 and 2 not in present_indices:
+                ph_idx = 2
 
             layout_ph   = get_layout_ph(template, layout_name, ph_idx)
             master_sh   = get_master_shape(template, ph_idx)

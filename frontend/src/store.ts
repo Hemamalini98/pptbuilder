@@ -47,6 +47,7 @@ export interface ShapeData {
   border?: {
     color?: string;
   };
+  rotation?: number;
 }
 
 export interface SlideData {

@@ -60,7 +60,7 @@ def create_excel_report(input_pptx, output_pptx, extracts_dir, customer_name, pr
             if shape.has_text_frame:
                 text = shape.text_frame.text.strip()
                 ref_pattern = re.compile(
-                    r"\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)\s*[\d.]+|\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)",
+                    r"\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)\s*[\d.-]+|\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)",
                     re.IGNORECASE
                 )
                 if ref_pattern.search(text):
