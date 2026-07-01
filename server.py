@@ -346,7 +346,7 @@ async def process_ppt(payload: dict = None, session_id: str = Depends(get_sessio
                 src_path = os.path.join(session_upload_dir, filename)
                 if os.path.exists(src_path):
                     # Match name (e.g. "Figure 1.1" or "Figure1.1") and write it with a space
-                    m = re.match(r"(figure|table)\s*([\d.]+)", name, re.IGNORECASE)
+                    m = re.match(r"(figure|table)\s*([\d.-]+)", name, re.IGNORECASE)
                     if m:
                         dest_name = f"{m.group(1).lower()} {m.group(2)}.png"
                     else:
@@ -367,7 +367,7 @@ async def process_ppt(payload: dict = None, session_id: str = Depends(get_sessio
                 name = fig.get("name")
                 filename = fig.get("filename")
                 if name and filename:
-                    m = re.match(r"(figure|table)\s*([\d.]+)", name, re.IGNORECASE)
+                    m = re.match(r"(figure|table)\s*([\d.-]+)", name, re.IGNORECASE)
                     if m:
                         candidate = f"{m.group(1).lower()} {m.group(2)}.png"
                     else:
