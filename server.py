@@ -129,7 +129,7 @@ def extract_pdf_captions(pdf_path):
     import re
     captions = []
     pattern = re.compile(r"^\s*(Figure|Fig\.|Table)\s+(\d+[-.\d]*)\b", re.IGNORECASE)
-    credit_pattern = re.compile(r"^\s*(Courtesy of|Source:|Source|Reproduced from|Reproduced with permission|Data from|Courtesy|Permission)\b", re.IGNORECASE)
+    credit_pattern = re.compile(r"^\s*(©|Copyright\b|Courtesy of\b|Source:\b|Source\b|Reproduced from\b|Reproduced with permission\b|Data from\b|Courtesy\b|Permission\b)", re.IGNORECASE)
     
     if not os.path.exists(pdf_path):
         return captions
