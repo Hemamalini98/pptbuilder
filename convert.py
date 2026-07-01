@@ -110,7 +110,7 @@ def _set_solid_fill(parent_el, rgb):
 # ── APPLY HELPERS ────────────────────────────────────────────────────────────
 
 def apply_run_style(run, style, color_scheme, font_scheme=None):
-    """Apply font-level properties from a style dict to a run."""
+    """Apply font-level properties from a style dict to a run, preserving local color overrides."""
     if not style:
         return
     font = run.font
@@ -134,7 +134,7 @@ def apply_run_style(run, style, color_scheme, font_scheme=None):
         font.italic = style["italic"]
     if "underline" in style and isinstance(style["underline"], bool):
         font.underline = style["underline"]
-    if "color" in style:
+    if "color" in style and (font.color is None or font.color.type is None):
         rgb = resolve_color(style["color"], color_scheme)
         if rgb:
             try:
