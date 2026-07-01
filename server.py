@@ -229,7 +229,11 @@ async def upload_ppt(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
         
         state["content_pptx"] = path
-        return {"ok": True, "filename": file.filename}
+        
+        from main import extract_template
+        slides_info = extract_template(path)
+        
+        return {"ok": True, "filename": file.filename, "slidesInfo": slides_info}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

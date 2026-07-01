@@ -95,6 +95,7 @@ export const Step3Figures: React.FC = () => {
     convertDeck,
     isConverting,
     conversionProgress,
+    slides,
   } = useStore();
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -104,11 +105,48 @@ export const Step3Figures: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [zoom, setZoom] = useState(1.0);
+  const [showOnlyMentioned, setShowOnlyMentioned] = useState(true);
   
   // Selection box state
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
   const [currentBox, setCurrentBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+
+  // Extract all figures/tables referenced in the source presentation
+  const mentionedRefs = React.useMemo(() => {
+    const refs = new Set<string>();
+    if (!slides) return refs;
+    slides.forEach((slide) => {
+      slide.shapes.forEach((shape: any) => {
+        const text = (shape.textBody?.paragraphs || [])
+          .map((para: any) => para.runs ? para.runs.map((r: any) => r.sampleText || '').join('') : '')
+          .join(' ')
+          .trim();
+        if (text) {
+          const figRegex = /\b(figure|fig\.?|f\.?)\s*([\d.]+)/gi;
+          let match;
+          while ((match = figRegex.exec(text)) !== null) {
+            refs.add(`figure ${match[2]}`.toLowerCase());
+            refs.add(`fig ${match[2]}`.toLowerCase());
+          }
+          const tabRegex = /\b(table|tab\.?|t\.?)\s*([\d.]+)/gi;
+          while ((match = tabRegex.exec(text)) !== null) {
+            refs.add(`table ${match[2]}`.toLowerCase());
+            refs.add(`tab ${match[2]}`.toLowerCase());
+          }
+        }
+      });
+    });
+    return refs;
+  }, [slides]);
+
+  const filteredCaptions = React.useMemo(() => {
+    if (!showOnlyMentioned) return pdfCaptions;
+    return pdfCaptions.filter(cap => {
+      const label = (cap.label || '').toLowerCase();
+      return mentionedRefs.has(label);
+    });
+  }, [pdfCaptions, showOnlyMentioned, mentionedRefs]);
 
   const ZOOM_STOPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
 
@@ -485,34 +523,82 @@ export const Step3Figures: React.FC = () => {
           </button>
         </div>
 
+        <div className="p-2 border-b border-[#334155] bg-[#1e293b] flex items-center justify-between text-[9.5px]">
+          <label className="flex items-center space-x-1.5 cursor-pointer text-slate-300 select-none">
+            <input
+              type="checkbox"
+              checked={showOnlyMentioned}
+              onChange={(e) => setShowOnlyMentioned(e.target.checked)}
+              className="rounded bg-[#0f172a] border-[#334155] text-[#38bdf8] focus:ring-0 focus:ring-offset-0 w-3 h-3 cursor-pointer"
+            />
+            <span>Show mentioned only ({filteredCaptions.length})</span>
+          </label>
+        </div>
+
         <div className="flex-1 overflow-y-auto p-2.5 space-y-3.5 ext-list">
-          {figures.map((fig) => (
-            <div key={fig.id} className="rounded-md border border-[#334155] bg-[#0f172a] flex flex-col overflow-hidden ext-card">
-              <div className="h-28 bg-[#0f172a] flex items-center justify-center p-1.5 ext-card-img">
-                <img src={fig.url} alt={fig.name} className="max-w-full max-h-full object-contain" />
-              </div>
-              <div className="px-2 pt-2 pb-0 space-y-2">
-                <select
-                  value={fig.caption || ""}
-                  onChange={(e) => {
-                    const selectedVal = e.target.value;
-                    const matchingCaption = pdfCaptions.find(c => c.text === selectedVal);
-                    if (matchingCaption) {
-                      renameFigure(fig.id, matchingCaption.label);
-                      updateFigureCaption(fig.id, matchingCaption.text, matchingCaption.credit);
-                    } else {
-                      updateFigureCaption(fig.id, "", "");
-                    }
-                  }}
-                  className="w-full bg-[#0f172a] border border-[#334155] rounded px-1.5 py-1 text-[#e2e8f0] text-[9.5px] outline-none focus:border-[#38bdf8] text-ellipsis overflow-hidden whitespace-nowrap"
-                >
-                  <option value="">-- Select Caption --</option>
-                  {pdfCaptions.map((cap) => (
-                    <option key={cap.id} value={cap.text}>
-                      {cap.label}: {cap.text.length > 25 ? cap.text.substring(0, 25) + '...' : cap.text}
-                    </option>
-                  ))}
-                </select>
+          {figures.map((fig) => {
+            const figuresList = filteredCaptions.filter(c => {
+              const lbl = (c.label || '').toLowerCase();
+              return lbl.startsWith('figure') || lbl.startsWith('fig');
+            });
+            const tablesList = filteredCaptions.filter(c => {
+              const lbl = (c.label || '').toLowerCase();
+              return lbl.startsWith('table') || lbl.startsWith('tab');
+            });
+            const othersList = filteredCaptions.filter(c => {
+              const lbl = (c.label || '').toLowerCase();
+              return !lbl.startsWith('figure') && !lbl.startsWith('fig') && !lbl.startsWith('table') && !lbl.startsWith('tab');
+            });
+
+            return (
+              <div key={fig.id} className="rounded-md border border-[#334155] bg-[#0f172a] flex flex-col overflow-hidden ext-card">
+                <div className="h-28 bg-[#0f172a] flex items-center justify-center p-1.5 ext-card-img">
+                  <img src={fig.url} alt={fig.name} className="max-w-full max-h-full object-contain" />
+                </div>
+                <div className="px-2 pt-2 pb-0 space-y-2">
+                  <select
+                    value={fig.caption || ""}
+                    onChange={(e) => {
+                      const selectedVal = e.target.value;
+                      const matchingCaption = pdfCaptions.find(c => c.text === selectedVal);
+                      if (matchingCaption) {
+                        renameFigure(fig.id, matchingCaption.label);
+                        updateFigureCaption(fig.id, matchingCaption.text, matchingCaption.credit);
+                      } else {
+                        updateFigureCaption(fig.id, "", "");
+                      }
+                    }}
+                    className="w-full bg-[#0f172a] border border-[#334155] rounded px-1.5 py-1 text-[#e2e8f0] text-[9.5px] outline-none focus:border-[#38bdf8] text-ellipsis overflow-hidden whitespace-nowrap"
+                  >
+                    <option value="">-- Select Caption --</option>
+                    {figuresList.length > 0 && (
+                      <optgroup label="Figures" className="bg-[#1e293b] text-slate-300 font-semibold text-[9px]">
+                        {figuresList.map((cap) => (
+                          <option key={cap.id} value={cap.text} className="bg-[#0f172a] text-[#e2e8f0] text-[9px]">
+                            {cap.label}: {cap.text.length > 25 ? cap.text.substring(0, 25) + '...' : cap.text}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {tablesList.length > 0 && (
+                      <optgroup label="Tables" className="bg-[#1e293b] text-slate-300 font-semibold text-[9px]">
+                        {tablesList.map((cap) => (
+                          <option key={cap.id} value={cap.text} className="bg-[#0f172a] text-[#e2e8f0] text-[9px]">
+                            {cap.label}: {cap.text.length > 25 ? cap.text.substring(0, 25) + '...' : cap.text}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {othersList.length > 0 && (
+                      <optgroup label="Others" className="bg-[#1e293b] text-slate-300 font-semibold text-[9px]">
+                        {othersList.map((cap) => (
+                          <option key={cap.id} value={cap.text} className="bg-[#0f172a] text-[#e2e8f0] text-[9px]">
+                            {cap.label}: {cap.text.length > 25 ? cap.text.substring(0, 25) + '...' : cap.text}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
 
                 {fig.credit && (
                   <div className="text-[8.5px] text-slate-400 bg-slate-900/50 p-1.5 rounded border border-slate-800/80 leading-normal">
@@ -540,7 +626,8 @@ export const Step3Figures: React.FC = () => {
                 </button>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="p-3 border-t border-[#334155] bg-[#1e293b] flex-shrink-0">

@@ -250,7 +250,10 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       });
       const data = await res.json();
       if (data.ok) {
-        set({ inputPptName: file.name });
+        set({ 
+          inputPptName: file.name,
+          slides: data.slidesInfo?.slides || null
+        });
       }
     } catch (err) {
       console.error('Failed to upload input PPT:', err);
