@@ -1,5 +1,16 @@
 import { create } from 'zustand';
 
+// Generate or retrieve session ID cookie
+(function getOrCreateSessionId() {
+  if (typeof document !== 'undefined') {
+    let sessionId = document.cookie.split('; ').find(row => row.startsWith('session_id='))?.split('=')[1];
+    if (!sessionId) {
+      sessionId = 'sess_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now();
+      document.cookie = `session_id=${sessionId}; path=/; max-ok=31536000; max-age=31536000; SameSite=Strict`;
+    }
+  }
+})();
+
 export interface ShapeStyle {
   font_name?: string | null;
   font_size_pt?: number | null;

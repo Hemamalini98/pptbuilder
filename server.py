@@ -2,7 +2,9 @@ import os
 import shutil
 import json
 import re
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import asyncio
+import time
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Cookie, Header, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -30,20 +32,98 @@ UPLOAD_DIR = os.path.abspath("uploads")
 TEMPLATES_DIR = os.path.join(UPLOAD_DIR, "templates")
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
-# State to keep track of currently active paths
-state = {
-    "template_pptx": None,
-    "template_style_json": None,
-    "content_pptx": None,
-    "styled_pptx": None,
-    "pdf_path": None,
-    "captions": []
-}
+# In-memory store for session-specific state
+session_states = {}
 
-def reset_state():
-    """Clear all session state keys."""
-    for key in state:
-        state[key] = None if key != "captions" else []
+def get_session_id(session_id: str = Cookie(default="default"), x_session_id: str = Header(default=None)):
+    """Retrieve session ID from cookie or header fallback."""
+    if x_session_id:
+        return x_session_id
+    return session_id
+
+def get_session_upload_dir(session_id: str) -> str:
+    """Gets and prepares the upload directory specific to a session."""
+    clean_id = re.sub(r'[^a-zA-Z0-9_-]', '', session_id)
+    if not clean_id:
+        clean_id = "default"
+    path = os.path.join(UPLOAD_DIR, clean_id)
+    os.makedirs(path, exist_ok=True)
+    os.makedirs(os.path.join(path, "pdf_extracts"), exist_ok=True)
+    os.makedirs(os.path.join(path, "rendered_slides"), exist_ok=True)
+    return path
+
+def get_session_state(session_id: str) -> dict:
+    """Retrieve or initialize state for a session."""
+    if session_id not in session_states:
+        session_states[session_id] = {
+            "template_pptx": None,
+            "template_style_json": None,
+            "content_pptx": None,
+            "styled_pptx": None,
+            "pdf_path": None,
+            "captions": []
+        }
+    return session_states[session_id]
+
+def reset_session_state(session_id: str):
+    """Clear session state keys."""
+    session_states[session_id] = {
+        "template_pptx": None,
+        "template_style_json": None,
+        "content_pptx": None,
+        "styled_pptx": None,
+        "pdf_path": None,
+        "captions": []
+    }
+
+def cleanup_session_dir(session_id: str):
+    """Deletes the entire user-specific session folder and resets state."""
+    try:
+        session_upload_dir = get_session_upload_dir(session_id)
+        if os.path.exists(session_upload_dir):
+            shutil.rmtree(session_upload_dir, ignore_errors=True)
+        reset_session_state(session_id)
+    except Exception as e:
+        print(f"Error during background session cleanup for {session_id}: {e}")
+
+def cleanup_old_sessions():
+    """Deletes session folders in UPLOAD_DIR that are older than 24 hours."""
+    now = time.time()
+    cutoff = now - 24 * 3600 # 24 hours ago
+    
+    if not os.path.exists(UPLOAD_DIR):
+        return
+        
+    for item in os.listdir(UPLOAD_DIR):
+        item_path = os.path.join(UPLOAD_DIR, item)
+        # Skip the templates directory
+        if item == "templates":
+            continue
+            
+        if os.path.isdir(item_path):
+            try:
+                mtime = os.path.getmtime(item_path)
+                if mtime < cutoff:
+                    shutil.rmtree(item_path, ignore_errors=True)
+                    if item in session_states:
+                        del session_states[item]
+            except Exception as e:
+                print(f"Failed to check/cleanup old session folder {item}: {e}")
+
+async def periodic_cleanup_loop():
+    while True:
+        try:
+            cleanup_old_sessions()
+        except Exception as e:
+            print(f"Error in periodic cleanup task: {e}")
+        # Run every hour
+        await asyncio.sleep(3600)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(periodic_cleanup_loop())
+
+
 
 def extract_pdf_captions(pdf_path):
     import re
@@ -98,12 +178,13 @@ def extract_pdf_captions(pdf_path):
     return captions
 
 @app.post("/api/reset")
-async def reset_session():
+async def reset_session(session_id: str = Depends(get_session_id)):
     """Wipe all uploaded session files (keep templates) and reset server state."""
     try:
-        # Remove all files and subdirs in UPLOAD_DIR except the templates folder
-        for item in os.listdir(UPLOAD_DIR):
-            item_path = os.path.join(UPLOAD_DIR, item)
+        session_upload_dir = get_session_upload_dir(session_id)
+        # Remove all files and subdirs in session_upload_dir except the templates folder
+        for item in os.listdir(session_upload_dir):
+            item_path = os.path.join(session_upload_dir, item)
             if item == "templates":
                 continue  # keep saved templates intact
             if os.path.isdir(item_path):
@@ -114,10 +195,10 @@ async def reset_session():
                 except Exception:
                     pass
         # Recreate necessary subdirs
-        os.makedirs(os.path.join(UPLOAD_DIR, "pdf_extracts"), exist_ok=True)
-        os.makedirs(os.path.join(UPLOAD_DIR, "rendered_slides"), exist_ok=True)
+        os.makedirs(os.path.join(session_upload_dir, "pdf_extracts"), exist_ok=True)
+        os.makedirs(os.path.join(session_upload_dir, "rendered_slides"), exist_ok=True)
         # Reset server state
-        reset_state()
+        reset_session_state(session_id)
         return {"ok": True, "message": "Session reset. All uploaded files cleared."}
     except Exception as e:
         return {"ok": False, "detail": str(e)}
@@ -163,13 +244,14 @@ def render_ppt_to_pngs(pptx_path, upload_dir):
         pix.save(png_path)
 
 @app.post("/api/upload-template")
-async def upload_template(file: UploadFile = File(...)):
+async def upload_template(file: UploadFile = File(...), session_id: str = Depends(get_session_id)):
     try:
         filename = file.filename
         path = os.path.join(TEMPLATES_DIR, filename)
         with open(path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
+        state = get_session_state(session_id)
         state["template_pptx"] = path
         
         # Extract styles using main.py logic
@@ -185,7 +267,7 @@ async def upload_template(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/templates")
-async def get_templates():
+async def get_templates(session_id: str = Depends(get_session_id)):
     try:
         templates = []
         if os.path.exists(TEMPLATES_DIR):
@@ -200,7 +282,7 @@ async def get_templates():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/select-template")
-async def select_template(data: dict):
+async def select_template(data: dict, session_id: str = Depends(get_session_id)):
     filename = data.get("filename")
     if not filename:
         raise HTTPException(status_code=400, detail="Missing filename")
@@ -212,6 +294,7 @@ async def select_template(data: dict):
     if not os.path.exists(path) or not os.path.exists(style_json_path):
         raise HTTPException(status_code=404, detail="Template or styles not found")
         
+    state = get_session_state(session_id)
     state["template_pptx"] = path
     state["template_style_json"] = style_json_path
     
@@ -222,12 +305,14 @@ async def select_template(data: dict):
 
 
 @app.post("/api/upload-ppt")
-async def upload_ppt(file: UploadFile = File(...)):
+async def upload_ppt(file: UploadFile = File(...), session_id: str = Depends(get_session_id)):
     try:
-        path = os.path.join(UPLOAD_DIR, "uploaded_content.pptx")
+        session_upload_dir = get_session_upload_dir(session_id)
+        path = os.path.join(session_upload_dir, "uploaded_content.pptx")
         with open(path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
+        state = get_session_state(session_id)
         state["content_pptx"] = path
         
         from main import extract_template
@@ -238,14 +323,16 @@ async def upload_ppt(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/process-ppt")
-async def process_ppt(payload: dict = None):
+async def process_ppt(payload: dict = None, session_id: str = Depends(get_session_id)):
     print("PROCESS_PPT payload:", payload)
+    state = get_session_state(session_id)
     if not state["content_pptx"] or not state["template_style_json"]:
         raise HTTPException(status_code=400, detail="Missing uploaded PPTX or Template style JSON")
     
     try:
+        session_upload_dir = get_session_upload_dir(session_id)
         # Recreate pdf_extracts folder
-        extracts_dir = os.path.join(UPLOAD_DIR, "pdf_extracts")
+        extracts_dir = os.path.join(session_upload_dir, "pdf_extracts")
         if os.path.exists(extracts_dir):
             shutil.rmtree(extracts_dir)
         os.makedirs(extracts_dir, exist_ok=True)
@@ -256,7 +343,7 @@ async def process_ppt(payload: dict = None):
             name = fig.get("name")
             filename = fig.get("filename")
             if name and filename:
-                src_path = os.path.join(UPLOAD_DIR, filename)
+                src_path = os.path.join(session_upload_dir, filename)
                 if os.path.exists(src_path):
                     # Match name (e.g. "Figure 1.1" or "Figure1.1") and write it with a space
                     m = re.match(r"(figure|table)\s*([\d.]+)", name, re.IGNORECASE)
@@ -266,7 +353,7 @@ async def process_ppt(payload: dict = None):
                         dest_name = f"{name.lower()}.png"
                     shutil.copy(src_path, os.path.join(extracts_dir, dest_name))
 
-        output_path = os.path.join(UPLOAD_DIR, "styled_output.pptx")
+        output_path = os.path.join(session_upload_dir, "styled_output.pptx")
         # Run conversion style formatting and automatic figure insertion
         used_figs = convert(state["content_pptx"], state["template_style_json"], output_path, apply_geometry=True, figures_metadata=figures)
         state["styled_pptx"] = output_path
@@ -297,10 +384,6 @@ async def process_ppt(payload: dict = None):
         
         # Save auto inserted list into local variable for returning in the response
         state["auto_inserted_list"] = auto_inserted_list
-
-
-        
-
         
         # Extract slides structure of the output file
         slides_info = extract_template(output_path)
@@ -316,10 +399,10 @@ async def process_ppt(payload: dict = None):
                         img = shape.image
                         ext = img.ext
                         img_filename = f"slide_{s_idx}_shape_{sh_idx}.{ext}"
-                        img_path = os.path.join(UPLOAD_DIR, img_filename)
+                        img_path = os.path.join(session_upload_dir, img_filename)
                         with open(img_path, "wb") as f:
                             f.write(img.blob)
-                        extracted_images[f"{s_idx}_{sh_idx}"] = f"/api/media/{img_filename}"
+                        extracted_images[f"{s_idx}_{sh_idx}"] = f"/api/media/{session_id}/{img_filename}"
                     except Exception:
                         pass
         
@@ -339,12 +422,14 @@ async def process_ppt(payload: dict = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(file: UploadFile = File(...), session_id: str = Depends(get_session_id)):
     try:
-        path = os.path.join(UPLOAD_DIR, "uploaded_document.pdf")
+        session_upload_dir = get_session_upload_dir(session_id)
+        path = os.path.join(session_upload_dir, "uploaded_document.pdf")
         with open(path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
+        state = get_session_state(session_id)
         state["pdf_path"] = path
         
         # Open PDF to get details
@@ -362,7 +447,8 @@ async def upload_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/pdf/captions")
-async def get_pdf_captions():
+async def get_pdf_captions(session_id: str = Depends(get_session_id)):
+    state = get_session_state(session_id)
     if not state["pdf_path"]:
         raise HTTPException(status_code=404, detail="No PDF uploaded")
     if not state.get("captions"):
@@ -370,7 +456,8 @@ async def get_pdf_captions():
     return {"ok": True, "captions": state["captions"]}
 
 @app.get("/api/pdf/info")
-async def get_pdf_info():
+async def get_pdf_info(session_id: str = Depends(get_session_id)):
+    state = get_session_state(session_id)
     if not state["pdf_path"]:
         raise HTTPException(status_code=404, detail="No PDF uploaded")
     try:
@@ -383,7 +470,8 @@ async def get_pdf_info():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/pdf/file")
-async def get_pdf_file():
+async def get_pdf_file(session_id: str = Depends(get_session_id)):
+    state = get_session_state(session_id)
     if not state["pdf_path"]:
         raise HTTPException(status_code=404, detail="No PDF uploaded")
     return FileResponse(state["pdf_path"], media_type="application/pdf")
@@ -395,11 +483,14 @@ async def extract_crop(
     x0: float = Form(...),
     y0: float = Form(...),
     x1: float = Form(...),
-    y1: float = Form(...)
+    y1: float = Form(...),
+    session_id: str = Depends(get_session_id)
 ):
+    state = get_session_state(session_id)
     if not state["pdf_path"]:
         raise HTTPException(status_code=404, detail="No PDF uploaded")
     try:
+        session_upload_dir = get_session_upload_dir(session_id)
         doc = fitz.open(state["pdf_path"])
         pdf_page = doc[page]
         
@@ -420,16 +511,16 @@ async def extract_crop(
         png_data = pix.tobytes("png")
         doc.close()
         
-        # Save crop image into UPLOAD_DIR
-        existing = [f for f in os.listdir(UPLOAD_DIR) if f.startswith("crop_") and f.endswith(".png")]
+        # Save crop image into session_upload_dir
+        existing = [f for f in os.listdir(session_upload_dir) if f.startswith("crop_") and f.endswith(".png")]
         idx = len(existing) + 1
         filename = f"crop_p{page+1}_{idx:03d}.png"
-        filepath = os.path.join(UPLOAD_DIR, filename)
+        filepath = os.path.join(session_upload_dir, filename)
         
         with open(filepath, "wb") as f:
             f.write(png_data)
             
-        return {"filename": filename, "url": f"/api/media/{filename}", "page": page + 1}
+        return {"filename": filename, "url": f"/api/media/{session_id}/{filename}", "page": page + 1}
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -443,17 +534,20 @@ async def add_image(
     y_pt: float = Form(...),
     w_pt: float = Form(...),
     h_pt: float = Form(...),
-    caption: str = Form(None)
+    caption: str = Form(None),
+    session_id: str = Depends(get_session_id)
 ):
+    state = get_session_state(session_id)
     target_pptx = state["styled_pptx"] or state["content_pptx"]
     if not target_pptx:
         raise HTTPException(status_code=400, detail="No PPTX presentation available to modify")
         
-    # Look in pdf_extracts first, then fall back to UPLOAD_DIR root
-    extracts_dir = os.path.join(UPLOAD_DIR, "pdf_extracts")
+    session_upload_dir = get_session_upload_dir(session_id)
+    # Look in pdf_extracts first, then fall back to session_upload_dir root
+    extracts_dir = os.path.join(session_upload_dir, "pdf_extracts")
     image_path = os.path.join(extracts_dir, image_name)
     if not os.path.exists(image_path):
-        image_path = os.path.join(UPLOAD_DIR, image_name)
+        image_path = os.path.join(session_upload_dir, image_name)
     if not os.path.exists(image_path):
         raise HTTPException(status_code=404, detail=f"Image {image_name} not found")
         
@@ -501,10 +595,10 @@ async def add_image(
                         img = shape.image
                         ext = img.ext
                         img_filename = f"slide_{s_idx}_shape_{sh_idx}.{ext}"
-                        img_path = os.path.join(UPLOAD_DIR, img_filename)
+                        img_path = os.path.join(session_upload_dir, img_filename)
                         with open(img_path, "wb") as f:
                             f.write(img.blob)
-                        extracted_images[f"{s_idx}_{sh_idx}"] = f"/api/media/{img_filename}"
+                        extracted_images[f"{s_idx}_{sh_idx}"] = f"/api/media/{session_id}/{img_filename}"
                     except Exception:
                         pass
                         
@@ -519,7 +613,8 @@ async def add_image(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/download")
-async def download_pptx():
+async def download_pptx(session_id: str = Depends(get_session_id)):
+    state = get_session_state(session_id)
     target_pptx = state["styled_pptx"] or state["content_pptx"]
     if not target_pptx or not os.path.exists(target_pptx):
         raise HTTPException(status_code=404, detail="No output PPTX available to download")
@@ -531,17 +626,19 @@ async def download_pptx():
 
 
 @app.get("/api/download-excel")
-async def download_excel(customerName: str = "", projectName: str = ""):
+async def download_excel(customerName: str = "", projectName: str = "", session_id: str = Depends(get_session_id)):
+    state = get_session_state(session_id)
     input_path = state.get("content_pptx")
-    output_path = state.get("styled_pptx") or os.path.join(UPLOAD_DIR, "styled_output.pptx")
+    session_upload_dir = get_session_upload_dir(session_id)
+    output_path = state.get("styled_pptx") or os.path.join(session_upload_dir, "styled_output.pptx")
     
     if not input_path or not os.path.exists(input_path):
         raise HTTPException(status_code=400, detail="Missing source presentation file.")
     if not os.path.exists(output_path):
         output_path = input_path
         
-    excel_path = os.path.join(UPLOAD_DIR, "compilation_report.xlsx")
-    extracts_dir = os.path.join(UPLOAD_DIR, "pdf_extracts")
+    excel_path = os.path.join(session_upload_dir, "compilation_report.xlsx")
+    extracts_dir = os.path.join(session_upload_dir, "pdf_extracts")
     
     try:
         from excel_report import create_excel_report
@@ -565,8 +662,10 @@ async def download_excel(customerName: str = "", projectName: str = ""):
 
 
 @app.get("/api/report-data")
-async def get_report_data():
-    output_path = os.path.join(UPLOAD_DIR, "styled_output.pptx")
+async def get_report_data(session_id: str = Depends(get_session_id)):
+    state = get_session_state(session_id)
+    session_upload_dir = get_session_upload_dir(session_id)
+    output_path = os.path.join(session_upload_dir, "styled_output.pptx")
     if not state["content_pptx"] or not os.path.exists(output_path):
         return {"ok": False, "changes": []}
     try:
@@ -577,22 +676,26 @@ async def get_report_data():
         return {"ok": False, "detail": str(e), "changes": []}
 
 @app.get("/api/figure-diagnostics")
-async def get_figure_diagnostics():
+async def get_figure_diagnostics(session_id: str = Depends(get_session_id)):
     """Return missing (requested but not cropped) and unplaced (cropped but no placeholder) figures."""
+    state = get_session_state(session_id)
     input_path = state.get("content_pptx")
     if not input_path or not os.path.exists(input_path):
         return {"ok": False, "missing": [], "unplaced": []}
     try:
         from report import collect_figure_diagnostics
-        extracts_dir = os.path.join(UPLOAD_DIR, "pdf_extracts")
+        session_upload_dir = get_session_upload_dir(session_id)
+        extracts_dir = os.path.join(session_upload_dir, "pdf_extracts")
         missing, unplaced = collect_figure_diagnostics(input_path, extracts_dir)
         return {"ok": True, "missing": missing, "unplaced": unplaced}
     except Exception as e:
         return {"ok": False, "detail": str(e), "missing": [], "unplaced": []}
 
 @app.get("/api/accessibility-report")
-async def get_accessibility_report():
-    output_path = state.get("styled_pptx") or os.path.join(UPLOAD_DIR, "styled_output.pptx")
+async def get_accessibility_report(session_id: str = Depends(get_session_id)):
+    state = get_session_state(session_id)
+    session_upload_dir = get_session_upload_dir(session_id)
+    output_path = state.get("styled_pptx") or os.path.join(session_upload_dir, "styled_output.pptx")
     if not os.path.exists(output_path):
         return {"ok": False, "issues": []}
     try:
