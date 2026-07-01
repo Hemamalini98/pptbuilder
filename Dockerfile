@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy all python files and config/templates
 COPY accessibility.py .
 COPY convert.py .
+COPY excel_report.py .
 COPY main.py .
 COPY pdfViewer.py .
 COPY report.py .

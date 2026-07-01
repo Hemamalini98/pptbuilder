@@ -4,3 +4,4 @@ pymupdf>=1.22.0
 python-pptx>=0.6.21
 lxml>=4.9.0
 python-multipart>=0.0.6
+openpyxl>=3.1.2

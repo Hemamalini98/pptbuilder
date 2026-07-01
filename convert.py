@@ -804,8 +804,9 @@ def restructure_cover_slide(slide, prs, cover_image_path=None, template_prs=None
 def fix_cover_title(slide):
     """
     After normal styling runs, correct the cover slide CENTER_TITLE:
-    - The layout lstStyle sets 60pt which is too large for long titles.
-    - Expected output uses 48pt with fontScale=90000 (effective ~43pt).
+    - Keep the font size applied dynamically from the template,
+      but scale it down if the text is very long to prevent overflow.
+    - normAutofit is configured so PowerPoint dynamically scales it down further if needed.
     """
     for shape in slide.shapes:
         try:
@@ -814,10 +815,24 @@ def fix_cover_title(slide):
             continue
         if str(ph.type) != "CENTER_TITLE (3)":
             continue
-        # Stamp 48pt on every rPr (run + endParaRPr)
-        for rPr in shape._element.iter(f"{{{A_NS}}}rPr"):
-            rPr.set("sz", "4800")
-        # Set normAutofit fontScale=90000
+        
+        # Calculate appropriate base font size based on text length to prevent overflow
+        text = shape.text_frame.text.strip()
+        text_len = len(text)
+        
+        target_sz = None
+        if text_len > 80:
+            target_sz = "3600"  # 36pt
+        elif text_len > 60:
+            target_sz = "4400"  # 44pt
+        elif text_len > 40:
+            target_sz = "4800"  # 48pt
+            
+        if target_sz:
+            for rPr in shape._element.iter(f"{{{A_NS}}}rPr"):
+                rPr.set("sz", target_sz)
+
+        # Set normAutofit
         txBody = shape.text_frame._txBody
         bodyPr = txBody.find(f"{{{A_NS}}}bodyPr")
         if bodyPr is not None:
@@ -825,7 +840,6 @@ def fix_cover_title(slide):
                 for old in bodyPr.findall(af_tag):
                     bodyPr.remove(old)
             normAF = etree.SubElement(bodyPr, f"{{{A_NS}}}normAutofit")
-            normAF.set("fontScale", "90000")
 
 
 # ── EXTRACTED IMAGE INSERTION ────────────────────────────────────────────────

@@ -526,6 +526,39 @@ async def download_pptx():
     )
 
 
+@app.get("/api/download-excel")
+async def download_excel(customerName: str = "", projectName: str = ""):
+    input_path = state.get("content_pptx")
+    output_path = state.get("styled_pptx") or os.path.join(UPLOAD_DIR, "styled_output.pptx")
+    
+    if not input_path or not os.path.exists(input_path):
+        raise HTTPException(status_code=400, detail="Missing source presentation file.")
+    if not os.path.exists(output_path):
+        output_path = input_path
+        
+    excel_path = os.path.join(UPLOAD_DIR, "compilation_report.xlsx")
+    extracts_dir = os.path.join(UPLOAD_DIR, "pdf_extracts")
+    
+    try:
+        from excel_report import create_excel_report
+        create_excel_report(
+            input_pptx=input_path,
+            output_pptx=output_path,
+            extracts_dir=extracts_dir,
+            customer_name=customerName,
+            project_name=projectName,
+            output_excel_path=excel_path
+        )
+        
+        return FileResponse(
+            excel_path,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="compilation_report.xlsx"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate Excel report: {str(e)}")
+
+
 
 @app.get("/api/report-data")
 async def get_report_data():

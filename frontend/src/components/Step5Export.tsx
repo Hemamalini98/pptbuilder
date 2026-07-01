@@ -37,7 +37,9 @@ export const Step5Export: React.FC = () => {
     resetSession,
     setStep,
     setCurrentSlideIndex,
-    setFocusedShapeIndex
+    setFocusedShapeIndex,
+    customerName,
+    projectName
   } = useStore();
 
   const [reportTab, setReportTab] = useState<'style' | 'figures' | 'accessibility'>('style');
@@ -97,6 +99,12 @@ export const Step5Export: React.FC = () => {
   const handleExportPpt = () => {
     toast.success("Downloading final styled presentation...");
     window.open('/api/download', '_blank');
+  };
+
+  const handleDownloadExcel = () => {
+    toast.success("Generating and downloading Excel report...");
+    const url = `/api/download-excel?customerName=${encodeURIComponent(customerName)}&projectName=${encodeURIComponent(projectName)}`;
+    window.open(url, '_blank');
   };
 
   const handleDownloadMappingJson = () => {
@@ -211,20 +219,28 @@ export const Step5Export: React.FC = () => {
           </div>
 
           {/* Quick Action Deck */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <button
               onClick={handleExportPpt}
-              className="py-4 px-6 bg-[var(--color-navy)] hover:bg-[var(--color-navy-light)] text-white font-bold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md flex items-center justify-center space-x-2.5 active:scale-[0.99]"
+              className="py-4 px-4 bg-[var(--color-navy)] hover:bg-[var(--color-navy-light)] text-white font-bold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md flex items-center justify-center space-x-2 active:scale-[0.99] text-xs"
             >
-              <Download className="w-5 h-5" />
-              <span>Download Styled Presentation</span>
+              <Download className="w-4 h-4" />
+              <span>Download Presentation</span>
+            </button>
+
+            <button
+              onClick={handleDownloadExcel}
+              className="py-4 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md flex items-center justify-center space-x-2 active:scale-[0.99] text-xs"
+            >
+              <Download className="w-4 h-4" />
+              <span>Download Excel Report</span>
             </button>
 
             <button
               onClick={handleDownloadMappingJson}
-              className="py-4 px-6 bg-white hover:bg-[var(--color-cream)] border border-[var(--color-border)] text-[var(--color-navy)] font-bold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-sm flex items-center justify-center space-x-2.5 active:scale-[0.99]"
+              className="py-4 px-4 bg-white hover:bg-[var(--color-cream)] border border-[var(--color-border)] text-[var(--color-navy)] font-bold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-sm flex items-center justify-center space-x-2 active:scale-[0.99] text-xs"
             >
-              <FileJson className="w-5 h-5 text-[var(--color-amber)]" />
+              <FileJson className="w-4 h-4 text-[var(--color-amber)]" />
               <span>Save Mappings JSON</span>
             </button>
           </div>
