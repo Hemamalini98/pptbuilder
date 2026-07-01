@@ -1,7 +1,7 @@
 from pptx import Presentation
 from pptx.util import Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_AUTO_SIZE
 from lxml import etree
 import copy
 import json
@@ -594,13 +594,23 @@ def input_slide_signature(slide):
     """Return a dict of {ph_idx: category} for an input slide."""
     sig = {}
     nonph_text_count = 0
+    has_picture = False
     for shape in slide.shapes:
         if shape.is_placeholder and shape.placeholder_format is not None:
             ph = shape.placeholder_format
             sig[ph.idx] = ph_type_category(str(ph.type))
-        elif shape.has_text_frame:
-            if any(p.text.strip() for p in shape.text_frame.paragraphs):
-                nonph_text_count += 1
+        else:
+            if shape.shape_type == 13: # MSO_SHAPE_TYPE.PICTURE is 13
+                has_picture = True
+            elif shape.has_text_frame:
+                text = shape.text_frame.text.strip()
+                if any(p.text.strip() for p in shape.text_frame.paragraphs):
+                    if _FIG_PAT.search(text):
+                        has_picture = True
+                    else:
+                        nonph_text_count += 1
+    if has_picture:
+        sig[10] = "picture"
     # Add virtual body entries for non-placeholder text boxes so that
     # two-content layouts score higher than single-body layouts when the
     # input uses a text box for the second column.
@@ -627,6 +637,11 @@ def layout_signature(layout_phs):
 def match_score(input_sig, template_sig):
     """Score how well two signatures match. Type match scores 2, idx-only scores 1."""
     score = 0
+    # Strong bonus for layouts that support pictures/figures when the slide has one
+    has_input_pic = any(cat == "picture" for cat in input_sig.values())
+    has_tmpl_pic = any(cat == "picture" for cat in template_sig.values())
+    if has_input_pic and has_tmpl_pic:
+        score += 3
     for idx, cat in input_sig.items():
         if idx in template_sig:
             score += 2 if template_sig[idx] == cat else 1
@@ -818,7 +833,7 @@ def fix_cover_title(slide):
 _FIG_PAT = re.compile(r'(figure|table)\s+([\d.]+)', re.IGNORECASE)
 
 
-def insert_figure_placeholders(prs, input_dir):
+def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=None):
     """
     Scan every slide for shapes whose text matches 'Figure X.X' (e.g. 'Insert Figure 2.1 here').
     If a matching PNG exists in pdf_extracts/, replace the shape with that image at the same
@@ -839,6 +854,25 @@ def insert_figure_placeholders(prs, input_dir):
     if not fig_map:
         return []
 
+    # Build caption & credit maps: normalized figure key -> caption / credit text
+    caption_map = {}
+    credit_map = {}
+    if figures_metadata:
+        for fig in figures_metadata:
+            name = fig.get("name")
+            caption = fig.get("caption")
+            credit = fig.get("credit")
+            if name:
+                m = re.match(r"(figure|table)\s*([\d.]+)", name, re.IGNORECASE)
+                if m:
+                    key = f"{m.group(1).lower()} {m.group(2)}"
+                else:
+                    key = name.lower()
+                if caption:
+                    caption_map[key] = caption
+                if credit:
+                    credit_map[key] = credit
+
     used = []
     for slide_idx, slide in enumerate(prs.slides):
         replacements = []
@@ -851,31 +885,324 @@ def insert_figure_placeholders(prs, input_dir):
                 continue
             fig_key = f"{m.group(1)} {m.group(2)}".lower()
             if fig_key in fig_map:
-                replacements.append((shape, fig_map[fig_key]))
+                replacements.append((shape, fig_map[fig_key], fig_key, text))
             else:
                 print(f"  Slide {slide_idx + 1}: image not found for '{fig_key}' — skipping")
 
-        for shape, img_path in replacements:
+        for shape, img_path, fig_key, original_text in replacements:
+            # Clean up existing double picture shapes on this slide to avoid overlays
+            for sh in list(slide.shapes):
+                if sh.shape_type == 13:
+                    try:
+                        sh._element.getparent().remove(sh._element)
+                    except Exception:
+                        pass
+
             try:
                 shape_idx = list(slide.shapes).index(shape)
             except ValueError:
                 shape_idx = 0
+
             left, top, w, h = shape.left, shape.top, shape.width, shape.height
+            layout_name = None
+
+            if template:
+                try:
+                    layout_name, _ = find_best_layout(slide, template)
+                    for lay in template.get("slideLayouts", []):
+                        if lay.get("layoutName") == layout_name:
+                            for ph in lay.get("placeholders", []):
+                                ph_type = ph.get("placeholder", {}).get("type")
+                                if ph_type == "PICTURE (18)":
+                                    pos = ph.get("position", {})
+                                    sz = ph.get("size", {})
+                                    if pos and sz:
+                                        left = int(pos["x_pt"] * PT_TO_EMU)
+                                        top = int(pos["y_pt"] * PT_TO_EMU)
+                                        w = int(sz["width_pt"] * PT_TO_EMU)
+                                        h = int(sz["height_pt"] * PT_TO_EMU)
+                                    break
+                except Exception as e:
+                    print(f"  Warning: Failed to resolve template picture geometry: {e}")
+
             print(f"  Slide {slide_idx + 1}: placeholder dims left={left} top={top} w={w} h={h}")
             shape._element.getparent().remove(shape._element)
-            # If shape had no stored size (auto-sizing text box stores 0),
-            # let add_picture use the image's natural size by omitting w/h,
-            # then scale it to fit a reasonable area within the slide.
-            if w <= 0 or h <= 0:
+            
+            # First, resolve caption and credit texts
+            caption_text = caption_map.get(fig_key)
+            if not caption_text:
+                m_orig = _FIG_PAT.search(original_text)
+                if m_orig:
+                    label = f"{m_orig.group(1).capitalize()} {m_orig.group(2)}"
+                    rest = original_text[m_orig.end():].strip()
+                    rest = re.sub(r'^[:\.\s\-\u2002\xa0]+', '', rest).strip()
+                    if rest:
+                        caption_text = f"{label}: {rest}"
+                    else:
+                        caption_text = label
+                else:
+                    caption_text = original_text
+
+            credit_text = credit_map.get(fig_key)
+
+            # Pre-resolve caption and credit styles to estimate required heights
+            font_size_pt = 18.0
+            font_italic = True
+            font_bold = False
+            font_color = None
+            font_family = "Arial"
+
+            cred_font_size_pt = 10.0
+            cred_italic = True
+            cred_bold = False
+            cred_font_family = "Arial"
+            cred_color = None
+
+            if caption_text and template:
+                try:
+                    layout_name, _ = find_best_layout(slide, template)
+                    caption_props = None
+                    for lay in template.get("slideLayouts", []):
+                        if lay.get("layoutName") == layout_name:
+                            for ph in lay.get("placeholders", []):
+                                idx = ph.get("placeholder", {}).get("idx")
+                                if idx in (10, 11):
+                                    tb = ph.get("textBody", {})
+                                    lst = tb.get("listStyle", {})
+                                    lvl1 = lst.get("lvl1pPr", {})
+                                    caption_props = lvl1.get("defaultRunProps", {})
+                                    break
+                            if caption_props:
+                                break
+                    if caption_props:
+                        if "fontSize_pt" in caption_props:
+                            font_size_pt = caption_props["fontSize_pt"]
+                        if "italic" in caption_props:
+                            font_italic = caption_props["italic"]
+                        if "bold" in caption_props:
+                            font_bold = caption_props["bold"]
+                        if "fontFamily" in caption_props:
+                            font_family = caption_props["fontFamily"]
+                        if "color" in caption_props:
+                            font_color = caption_props["color"]
+                except Exception as e:
+                    print(f"  Warning: Failed to resolve template caption style: {e}")
+
+            if credit_text and template:
+                try:
+                    layout_name, _ = find_best_layout(slide, template)
+                    credit_props = None
+                    for lay in template.get("slideLayouts", []):
+                        if lay.get("layoutName") == layout_name:
+                            for ph in lay.get("placeholders", []):
+                                idx = ph.get("placeholder", {}).get("idx")
+                                if idx in (10, 11):
+                                    tb = ph.get("textBody", {})
+                                    lst = tb.get("listStyle", {})
+                                    lvl1 = lst.get("lvl1pPr", {})
+                                    credit_props = lvl1.get("defaultRunProps", {})
+                                    break
+                            if credit_props:
+                                break
+                    if credit_props:
+                        if "fontSize_pt" in credit_props:
+                            cred_font_size_pt = credit_props["fontSize_pt"]
+                        if "italic" in credit_props:
+                            cred_italic = credit_props["italic"]
+                        if "bold" in credit_props:
+                            cred_bold = credit_props["bold"]
+                        if "fontFamily" in credit_props:
+                            cred_font_family = credit_props["fontFamily"]
+                        if "color" in credit_props:
+                            cred_color = credit_props["color"]
+                except Exception as e:
+                    print(f"  Warning: Failed to resolve template credit style: {e}")
+
+            # Determine horizontal boundaries from template to estimate text wraps
+            text_width = w
+            cap_left = left
+            cap_width = w
+            if template and layout_name:
+                try:
+                    for lay in template.get("slideLayouts", []):
+                        if lay.get("layoutName") == layout_name:
+                            for ph in lay.get("placeholders", []):
+                                idx = ph.get("placeholder", {}).get("idx")
+                                if idx in (10, 11) and ph.get("placeholder", {}).get("type") != "PICTURE (18)":
+                                    pos = ph.get("position", {})
+                                    sz = ph.get("size", {})
+                                    if pos and sz:
+                                        cap_left = int(pos["x_pt"] * PT_TO_EMU)
+                                        cap_width = int(sz["width_pt"] * PT_TO_EMU)
+                                        text_width = cap_width
+                                        break
+                except Exception:
+                    pass
+
+            # Estimate required vertical space for caption and credit line
+            reserved_h = Pt(0)
+            cap_height = Pt(0)
+            cred_height = Pt(0)
+
+            if caption_text:
+                cap_chars_per_line = max(10, int((text_width / PT_TO_EMU) / (font_size_pt * 0.38)))
+                cap_lines = (len(caption_text) + cap_chars_per_line - 1) // cap_chars_per_line
+                cap_height = Pt(cap_lines * (font_size_pt + 4) + 12)
+                reserved_h += cap_height + Pt(10) # 10 pt gap below image
+
+            if credit_text:
+                cred_chars_per_line = max(10, int((text_width / PT_TO_EMU) / (cred_font_size_pt * 0.38)))
+                cred_lines = (len(credit_text) + cred_chars_per_line - 1) // cred_chars_per_line
+                cred_height = Pt(cred_lines * (cred_font_size_pt + 4) + 12)
+                reserved_h += cred_height + Pt(5) # 5 pt gap below caption
+
+            # Shrink available picture height to reserve room at the bottom of the slide/placeholder
+            max_pic_h = h
+            if reserved_h > 0:
+                max_pic_h = max(Pt(100), h - reserved_h)
+
+            pic = None
+            if w <= 0 or max_pic_h <= 0:
                 pic = slide.shapes.add_picture(img_path, left, top)
-                # Scale to at most 60% of slide width, preserving aspect ratio
                 max_w = int(prs.slide_width * 0.60)
                 if pic.width > max_w:
                     ratio = max_w / pic.width
                     pic.width  = max_w
                     pic.height = int(pic.height * ratio)
             else:
-                slide.shapes.add_picture(img_path, left, top, w, h)
+                # Load picture to get its original size, then scale preserving aspect ratio to fit inside (w, max_pic_h)
+                pic = slide.shapes.add_picture(img_path, left, top)
+                orig_w, orig_h = pic.width, pic.height
+                ratio = min(w / orig_w, max_pic_h / orig_h)
+                pic.width = int(orig_w * ratio)
+                pic.height = int(orig_h * ratio)
+                # Center the image horizontally and vertically within the remaining placeholder box
+                pic.left = left + int((w - pic.width) / 2)
+                pic.top = top + int((max_pic_h - pic.height) / 2)
+
+            # Insert Caption Textbox if text exists
+            if caption_text and pic:
+                # Force caption bounds to match actual final placed image bounds
+                cap_left = pic.left
+                cap_width = pic.width
+
+                # 1. Determine font sizes first
+                adjusted_font_size = font_size_pt
+                adjusted_cred_font_size = cred_font_size_pt
+                
+                cap_top = pic.top + pic.height + Pt(10)
+                
+                total_chars = len(caption_text or '') + len(credit_text or '')
+                if total_chars > 0:
+                    box_width_in = float(cap_width) / 914400.0
+                    max_total_height_in = (float(prs.slide_height) - float(cap_top)) / 914400.0 - 0.1
+                    if max_total_height_in <= 0.5:
+                        max_total_height_in = 1.8
+                        
+                    avg_font_size = (adjusted_font_size + adjusted_cred_font_size) / 2.0
+                    line_height_in = (avg_font_size / 72.0) * 1.25
+                    char_width_in = (avg_font_size / 72.0) * 0.43
+                    
+                    chars_per_line = max(1, int(box_width_in / char_width_in))
+                    max_lines = max(1, int(max_total_height_in / line_height_in))
+                    total_capacity = chars_per_line * max_lines
+                    
+                    if total_chars > total_capacity:
+                        scale_factor = (float(total_capacity) / total_chars) ** 0.5
+                        adjusted_font_size = max(7.0, adjusted_font_size * scale_factor)
+                        adjusted_cred_font_size = max(6.0, adjusted_cred_font_size * scale_factor)
+
+                # 2. Recalculate heights using adjusted font sizes
+                cap_chars_per_line = max(10, int((cap_width / PT_TO_EMU) / (adjusted_font_size * 0.38)))
+                cap_lines = (len(caption_text) + cap_chars_per_line - 1) // cap_chars_per_line
+                cap_height = Pt(cap_lines * (adjusted_font_size + 4) + 12)
+
+                if credit_text:
+                    cred_chars_per_line = max(10, int((cap_width / PT_TO_EMU) / (adjusted_cred_font_size * 0.38)))
+                    cred_lines = (len(credit_text) + cred_chars_per_line - 1) // cred_chars_per_line
+                    cred_height = Pt(cred_lines * (adjusted_cred_font_size + 4) + 12)
+                else:
+                    cred_height = Pt(0)
+
+                # 3. Position calculations with slide bounds check
+                total_text_height = cap_height + (cred_height + Pt(5) if credit_text else Pt(0))
+                if cap_top + total_text_height > prs.slide_height:
+                    cap_top = prs.slide_height - total_text_height - Pt(5)
+                    if cap_top < pic.top + pic.height:
+                        cap_top = pic.top + pic.height + Pt(2)
+
+                # 4. Create separate Caption Box
+                txBox = slide.shapes.add_textbox(cap_left, cap_top, cap_width, cap_height)
+                tf = txBox.text_frame
+                tf.word_wrap = True
+                try:
+                    tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+                except Exception:
+                    pass
+                p = tf.paragraphs[0]
+                p.text = caption_text
+                p.font.size = Pt(adjusted_font_size)
+                p.font.italic = font_italic
+                p.font.bold = font_bold
+
+                if font_family:
+                    if font_family in THEME_FONTS:
+                        key = THEME_FONT_KEY.get(font_family, "minor")
+                        font_scheme = template.get("theme", {}).get("fontScheme", {})
+                        resolved_fn = font_scheme.get(key) if font_scheme else None
+                        if resolved_fn:
+                            p.font.name = resolved_fn
+                    else:
+                        p.font.name = font_family
+
+                if font_color:
+                    color_scheme = template.get("theme", {}).get("colorScheme", {})
+                    rgb = resolve_color(font_color, color_scheme)
+                    if rgb:
+                        try:
+                            p.font.color.rgb = rgb
+                        except Exception:
+                            pass
+
+                # 5. Create separate Credit Box if it exists
+                if credit_text:
+                    cred_left = cap_left
+                    cred_width = cap_width
+                    cred_top = cap_top + cap_height + Pt(5)
+
+                    txBoxCred = slide.shapes.add_textbox(cred_left, cred_top, cred_width, cred_height)
+                    tf_cred = txBoxCred.text_frame
+                    tf_cred.word_wrap = True
+                    try:
+                        tf_cred.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+                    except Exception:
+                        pass
+                    p_cred = tf_cred.paragraphs[0]
+                    p_cred.text = credit_text
+                    
+                    p_cred.font.size = Pt(adjusted_cred_font_size)
+                    p_cred.font.italic = cred_italic
+                    p_cred.font.bold = cred_bold
+
+                    if cred_font_family in THEME_FONTS:
+                        key = THEME_FONT_KEY.get(cred_font_family, "minor")
+                        font_scheme = template.get("theme", {}).get("fontScheme", {})
+                        resolved_fn = font_scheme.get(key) if font_scheme else None
+                        if resolved_fn:
+                            p_cred.font.name = resolved_fn
+                    else:
+                        p_cred.font.name = cred_font_family
+
+                    if cred_color:
+                        color_scheme = template.get("theme", {}).get("colorScheme", {})
+                        rgb = resolve_color(cred_color, color_scheme)
+                        if rgb:
+                            try:
+                                p_cred.font.color.rgb = rgb
+                            except Exception:
+                                pass
+
+
             fname = os.path.basename(img_path)
             used.append({
                 "dest_name": fname,
@@ -958,7 +1285,7 @@ def find_cover_image(input_path, explicit_cover=None):
     return candidates[0] if candidates else None
 
 
-def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None):
+def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None, figures_metadata=None):
     """
     Apply template styles to input.pptx and save as output.pptx.
 
@@ -1138,7 +1465,7 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             fix_cover_title(slide)
 
     input_dir = os.path.dirname(os.path.abspath(input_path))
-    used_figs = insert_figure_placeholders(prs, input_dir)
+    used_figs = insert_figure_placeholders(prs, input_dir, figures_metadata, template=template)
 
     # Insert remaining loose figure extracts at the end
     skip_names = {x["dest_name"] for x in used_figs}

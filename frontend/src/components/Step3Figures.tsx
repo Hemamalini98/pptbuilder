@@ -87,8 +87,10 @@ export const Step3Figures: React.FC = () => {
     pdfUrl,
     currentPdfPage,
     figures,
+    pdfCaptions,
     addFigure,
     renameFigure,
+    updateFigureCaption,
     deleteFigure,
     convertDeck,
     isConverting,
@@ -151,6 +153,24 @@ export const Step3Figures: React.FC = () => {
       if (timer) clearTimeout(timer);
     };
   }, [pdfUrl]);
+
+  // Load captions if empty (e.g. on page refresh or pre-existing upload)
+  useEffect(() => {
+    const fetchCaptions = async () => {
+      if (pdfUrl && pdfCaptions.length === 0) {
+        try {
+          const res = await fetch('/api/pdf/captions');
+          const data = await res.json();
+          if (data.ok) {
+            useStore.setState({ pdfCaptions: data.captions || [] });
+          }
+        } catch (e) {
+          console.error("Failed to fetch captions:", e);
+        }
+      }
+    };
+    fetchCaptions();
+  }, [pdfUrl, pdfCaptions.length]);
 
   // Render current page when page changes or zoom changes
   useEffect(() => {
@@ -470,6 +490,36 @@ export const Step3Figures: React.FC = () => {
             <div key={fig.id} className="rounded-md border border-[#334155] bg-[#0f172a] flex flex-col overflow-hidden ext-card">
               <div className="h-28 bg-[#0f172a] flex items-center justify-center p-1.5 ext-card-img">
                 <img src={fig.url} alt={fig.name} className="max-w-full max-h-full object-contain" />
+              </div>
+              <div className="px-2 pt-2 pb-0 space-y-2">
+                <select
+                  value={fig.caption || ""}
+                  onChange={(e) => {
+                    const selectedVal = e.target.value;
+                    const matchingCaption = pdfCaptions.find(c => c.text === selectedVal);
+                    if (matchingCaption) {
+                      renameFigure(fig.id, matchingCaption.label);
+                      updateFigureCaption(fig.id, matchingCaption.text, matchingCaption.credit);
+                    } else {
+                      updateFigureCaption(fig.id, "", "");
+                    }
+                  }}
+                  className="w-full bg-[#0f172a] border border-[#334155] rounded px-1.5 py-1 text-[#e2e8f0] text-[9.5px] outline-none focus:border-[#38bdf8] text-ellipsis overflow-hidden whitespace-nowrap"
+                >
+                  <option value="">-- Select Caption --</option>
+                  {pdfCaptions.map((cap) => (
+                    <option key={cap.id} value={cap.text}>
+                      {cap.label}: {cap.text.length > 25 ? cap.text.substring(0, 25) + '...' : cap.text}
+                    </option>
+                  ))}
+                </select>
+
+                {fig.credit && (
+                  <div className="text-[8.5px] text-slate-400 bg-slate-900/50 p-1.5 rounded border border-slate-800/80 leading-normal">
+                    <span className="font-semibold text-slate-500 block text-[7px] uppercase tracking-wider mb-0.5">Credit</span>
+                    {fig.credit}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-1.5 p-2 bg-[#1e293b] border-t border-[#334155] ext-card-foot">
                 <input

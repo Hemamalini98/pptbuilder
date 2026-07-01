@@ -3,6 +3,33 @@ import { useStore } from '../store';
 import { Download, RefreshCw, AlertTriangle, FileJson, Check, LayoutGrid, BarChart2, ImageOff, Activity, ChevronDown, ChevronUp } from 'lucide-react';
 import { toast } from 'sonner';
 
+const getNormalizedRefName = (text: string) => {
+  const match = text.match(/\b(figure|fig\.?|f\.?)\s*([\d.]+)/i)
+    || text.match(/\binsert\s+(figure|fig\.?|f\.?)\s*([\d.]+)/i);
+  if (match) {
+    return `figure ${match[2]}`;
+  }
+  const matchTab = text.match(/\b(table|tab\.?|t\.?)\s*([\d.]+)/i)
+    || text.match(/\binsert\s+(table|tab\.?|t\.?)\s*([\d.]+)/i);
+  if (matchTab) {
+    return `table ${matchTab[2]}`;
+  }
+  return null;
+};
+
+const isShapeMissingFigure = (text: string, slideIndex: number, figures: any[]) => {
+  const clean = text.trim();
+  const refName = getNormalizedRefName(clean);
+  if (refName) {
+    const isMapped = figures.some(
+      (f) => f.name.toLowerCase().trim() === refName && f.mappedTo?.slideIndex === slideIndex
+    );
+    return !isMapped;
+  }
+  return /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(clean)
+    || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(clean);
+};
+
 export const Step5Export: React.FC = () => {
   const {
     figures,
@@ -58,7 +85,8 @@ export const Step5Export: React.FC = () => {
           .map((para: any) => para.runs ? para.runs.map((r: any) => r.sampleText || '').join('') : '')
           .join(' ')
           .trim();
-        const isFigRef = /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(text) || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(text);
+        const slideIndex = (slides || []).findIndex((s) => s.slide_id === slide.slide_id);
+        const isFigRef = isShapeMissingFigure(text, slideIndex, figures);
         if (isFigRef) {
           emptyPlaceholdersCount++;
         }
@@ -234,11 +262,15 @@ export const Step5Export: React.FC = () => {
                     .join(' ')
                     .trim();
                   
-                  const match = text.match(/\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i) || text.match(/\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i);
+                  const isExactRef = /^(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*([\d.]+)[.:]?$/i;
+                  const isInsertRef = /^insert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*([\d.]+))?(?:\s+here)?[.:]?$/i;
+                  
+                  const match = text.match(isExactRef) || text.match(isInsertRef);
                   if (match) {
-                    missingRefs.push({ label: match[0].toUpperCase(), shapeIndex: s.index });
+                    const figNum = match[2] || '';
+                    missingRefs.push({ label: `${match[1].toUpperCase()}${figNum ? ' ' + figNum : ''}`, shapeIndex: s.index });
                   } else {
-                    const isFigRef = /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(text) || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(text);
+                    const isFigRef = isShapeMissingFigure(text, idx, figures);
                     if (isFigRef) {
                       missingRefs.push({ label: text.length > 25 ? text.substring(0, 25) + '...' : text, shapeIndex: s.index });
                     }

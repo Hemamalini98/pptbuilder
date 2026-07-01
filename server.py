@@ -36,13 +36,66 @@ state = {
     "template_style_json": None,
     "content_pptx": None,
     "styled_pptx": None,
-    "pdf_path": None
+    "pdf_path": None,
+    "captions": []
 }
 
 def reset_state():
     """Clear all session state keys."""
     for key in state:
-        state[key] = None
+        state[key] = None if key != "captions" else []
+
+def extract_pdf_captions(pdf_path):
+    import re
+    captions = []
+    pattern = re.compile(r"^\s*(Figure|Fig\.|Table)\s+(\d+[-.\d]*)\b", re.IGNORECASE)
+    credit_pattern = re.compile(r"^\s*(Courtesy of|Source:|Source|Reproduced from|Reproduced with permission|Data from|Courtesy|Permission)\b", re.IGNORECASE)
+    
+    if not os.path.exists(pdf_path):
+        return captions
+        
+    try:
+        doc = fitz.open(pdf_path)
+        for page_idx in range(len(doc)):
+            page = doc[page_idx]
+            blocks = page.get_text("blocks")
+            for b_idx, b in enumerate(blocks):
+                text = b[4].strip()
+                if not text:
+                    continue
+                lines = text.split("\n")
+                for line_idx, line in enumerate(lines):
+                    line = line.strip()
+                    match = pattern.match(line)
+                    if match:
+                        caption_lines = lines[line_idx:]
+                        full_caption = " ".join(caption_lines)
+                        clean_text = " ".join(full_caption.split())
+                        
+                        # Check if the next block contains a credit/source line
+                        credit_text = ""
+                        if b_idx + 1 < len(blocks):
+                            next_text = blocks[b_idx + 1][4].strip()
+                            if credit_pattern.match(next_text):
+                                credit_text = " ".join(next_text.split())
+                        
+                        cap_type = match.group(1).capitalize()
+                        if cap_type.startswith("Fig"):
+                            cap_type = "Figure"
+                        normalized_label = f"{cap_type} {match.group(2)}"
+                        
+                        captions.append({
+                            "id": f"cap_{page_idx}_{b_idx}_{line_idx}",
+                            "page": page_idx + 1,
+                            "label": normalized_label,
+                            "text": clean_text,
+                            "credit": credit_text
+                        })
+                        break
+        doc.close()
+    except Exception as e:
+        print("Error extracting PDF captions:", e)
+    return captions
 
 @app.post("/api/reset")
 async def reset_session():
@@ -211,7 +264,7 @@ async def process_ppt(payload: dict = None):
 
         output_path = os.path.join(UPLOAD_DIR, "styled_output.pptx")
         # Run conversion style formatting and automatic figure insertion
-        used_figs = convert(state["content_pptx"], state["template_style_json"], output_path, apply_geometry=True)
+        used_figs = convert(state["content_pptx"], state["template_style_json"], output_path, apply_geometry=True, figures_metadata=figures)
         state["styled_pptx"] = output_path
 
         # Resolve auto-inserted figures back to original filenames
@@ -296,9 +349,21 @@ async def upload_pdf(file: UploadFile = File(...)):
         filename = file.filename
         doc.close()
         
-        return {"ok": True, "filename": filename, "pageCount": page_count}
+        # Extract captions
+        captions = extract_pdf_captions(path)
+        state["captions"] = captions
+        
+        return {"ok": True, "filename": filename, "pageCount": page_count, "captions": captions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/pdf/captions")
+async def get_pdf_captions():
+    if not state["pdf_path"]:
+        raise HTTPException(status_code=404, detail="No PDF uploaded")
+    if not state.get("captions"):
+        state["captions"] = extract_pdf_captions(state["pdf_path"])
+    return {"ok": True, "captions": state["captions"]}
 
 @app.get("/api/pdf/info")
 async def get_pdf_info():
@@ -373,7 +438,8 @@ async def add_image(
     x_pt: float = Form(...),
     y_pt: float = Form(...),
     w_pt: float = Form(...),
-    h_pt: float = Form(...)
+    h_pt: float = Form(...),
+    caption: str = Form(None)
 ):
     target_pptx = state["styled_pptx"] or state["content_pptx"]
     if not target_pptx:
@@ -402,7 +468,21 @@ async def add_image(
         height = Pt(h_pt)
         
         # Insert image
-        slide.shapes.add_picture(image_path, left, top, width, height)
+        pic = slide.shapes.add_picture(image_path, left, top, width, height)
+        
+        if caption:
+            cap_top = top + height + Pt(10)
+            cap_height = Pt(35)
+            if cap_top + cap_height > prs.slide_height:
+                cap_top = prs.slide_height - cap_height - Pt(10)
+            txBox = slide.shapes.add_textbox(left, cap_top, width, cap_height)
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            p = tf.paragraphs[0]
+            p.text = caption
+            p.font.size = Pt(10)
+            p.font.italic = True
+            
         prs.save(target_pptx)
         
         # Re-extract slide info to reflect updates

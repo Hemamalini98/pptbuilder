@@ -59,10 +59,20 @@ export interface Figure {
   url: string; // url to render
   page: number; // 1-indexed
   filename: string; // unique identifier in backend uploads
+  caption?: string; // extracted figure caption
+  credit?: string;  // extracted figure credit
   mappedTo?: {
     slideIndex: number;
     shapeIndex: number;
   } | null;
+}
+
+export interface PdfCaption {
+  id: string;
+  page: number; // 1-indexed
+  label: string; // e.g. "Figure 1.1" or "Table 1"
+  text: string;  // full caption text
+  credit?: string; // credit text
 }
 
 interface StoredTemplate {
@@ -98,8 +108,10 @@ interface DeckforgeState {
   pdfUrl: string | null;
   currentPdfPage: number; // 0-indexed
   figures: Figure[];
+  pdfCaptions: PdfCaption[];
   addFigure: (figure: Omit<Figure, 'id' | 'name'>) => void;
   renameFigure: (id: string, newName: string) => void;
+  updateFigureCaption: (id: string, caption: string, credit?: string) => void;
   deleteFigure: (id: string) => void;
 
   // Step 4: Review & Mapping
@@ -148,6 +160,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
   pdfUrl: null,
   currentPdfPage: 0,
   figures: [],
+  pdfCaptions: [],
 
   // Step 4
   slides: null,
@@ -260,6 +273,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
           sourcePdfPages: data.pageCount,
           pdfUrl: `/api/pdf/file`,
           currentPdfPage: 0,
+          pdfCaptions: data.captions || [],
         });
       }
     } catch (err) {
@@ -279,7 +293,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
     try {
       const figuresPayload = get().figures.map((f) => ({
         name: f.name,
-        filename: f.filename
+        filename: f.filename,
+        caption: f.caption,
+        credit: f.credit,
       }));
 
       const res = await fetch('/api/process-ppt', {
@@ -345,6 +361,12 @@ export const useStore = create<DeckforgeState>((set, get) => ({
     }));
   },
 
+  updateFigureCaption: (id, caption, credit) => {
+    set((state) => ({
+      figures: state.figures.map((f) => (f.id === id ? { ...f, caption, credit } : f)),
+    }));
+  },
+
   deleteFigure: (id) => {
     set((state) => ({
       figures: state.figures.filter((f) => f.id !== id),
@@ -367,6 +389,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       formData.append('y_pt', String(targetShape.position.y_pt));
       formData.append('w_pt', String(targetShape.size.width_pt));
       formData.append('h_pt', String(targetShape.size.height_pt));
+      if (figure.caption) {
+        formData.append('caption', figure.caption);
+      }
 
       const res = await fetch('/api/add-image', {
         method: 'POST',
@@ -402,6 +427,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       formData.append('y_pt', String(y_pt));
       formData.append('w_pt', String(w_pt));
       formData.append('h_pt', String(h_pt));
+      if (figure.caption) {
+        formData.append('caption', figure.caption);
+      }
 
       const res = await fetch('/api/add-image', {
         method: 'POST',
@@ -470,6 +498,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       pdfUrl: null,
       currentPdfPage: 0,
       figures: [],
+      pdfCaptions: [],
       slides: null,
       currentSlideIndex: 0,
       focusedShapeIndex: null,

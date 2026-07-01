@@ -2,6 +2,33 @@ import React, { useRef, useState, useEffect } from 'react';
 import { useStore } from '../store';
 import { LayoutGrid, Play, AlertTriangle } from 'lucide-react';
 
+const getNormalizedRefName = (text: string) => {
+  const match = text.match(/\b(figure|fig\.?|f\.?)\s*([\d.]+)/i)
+    || text.match(/\binsert\s+(figure|fig\.?|f\.?)\s*([\d.]+)/i);
+  if (match) {
+    return `figure ${match[2]}`;
+  }
+  const matchTab = text.match(/\b(table|tab\.?|t\.?)\s*([\d.]+)/i)
+    || text.match(/\binsert\s+(table|tab\.?|t\.?)\s*([\d.]+)/i);
+  if (matchTab) {
+    return `table ${matchTab[2]}`;
+  }
+  return null;
+};
+
+const isShapeMissingFigure = (text: string, slideIndex: number, figures: any[]) => {
+  const clean = text.trim();
+  const refName = getNormalizedRefName(clean);
+  if (refName) {
+    const isMapped = figures.some(
+      (f) => f.name.toLowerCase().trim() === refName && f.mappedTo?.slideIndex === slideIndex
+    );
+    return !isMapped;
+  }
+  return /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(clean)
+    || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(clean);
+};
+
 export const Step4Mapping: React.FC = () => {
   const {
     slides,
@@ -9,7 +36,8 @@ export const Step4Mapping: React.FC = () => {
     setCurrentSlideIndex,
     setStep,
     focusedShapeIndex,
-    setFocusedShapeIndex
+    setFocusedShapeIndex,
+    figures
   } = useStore();
 
   const canvasContainerRef = useRef<HTMLDivElement>(null);
@@ -33,7 +61,8 @@ export const Step4Mapping: React.FC = () => {
         .map((para: any) => para.runs ? para.runs.map((r: any) => r.sampleText || '').join('') : '')
         .join(' ')
         .trim();
-      const isFigRef = /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(text) || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(text);
+      const slideIndex = (slides || []).findIndex((s: any) => s.slide_id === slide.slide_id);
+      const isFigRef = isShapeMissingFigure(text, slideIndex, figures);
       if (shape.imageUrl) {
         const fileName = shape.imageUrl.split('/').pop() || 'image';
         items.push({
@@ -320,7 +349,7 @@ export const Step4Mapping: React.FC = () => {
                   .map((para: any) => para.runs ? para.runs.map((r: any) => r.sampleText || '').join('') : '')
                   .join(' ')
                   .trim();
-                return /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(text) || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(text);
+                return isShapeMissingFigure(text, idx, figures);
               });
 
               if (filterMissing && !hasMissingFigures) {
@@ -457,7 +486,7 @@ export const Step4Mapping: React.FC = () => {
                   .map((para: any) => para.runs ? para.runs.map((r: any) => r.sampleText || '').join('') : '')
                   .join(' ')
                   .trim();
-                return /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(text) || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(text);
+                return isShapeMissingFigure(text, currentSlideIndex, figures);
               }) : [];
 
               if (missingForActive.length === 0) return null;
