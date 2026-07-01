@@ -123,13 +123,13 @@ export const Step3Figures: React.FC = () => {
           .join(' ')
           .trim();
         if (text) {
-          const figRegex = /\b(figure|fig\.?|f\.?)\s*([\d.]+)/gi;
+          const figRegex = /\b(figure|fig\.?|f\.?)\s*([\d.-]+)/gi;
           let match;
           while ((match = figRegex.exec(text)) !== null) {
             refs.add(`figure ${match[2]}`.toLowerCase());
             refs.add(`fig ${match[2]}`.toLowerCase());
           }
-          const tabRegex = /\b(table|tab\.?|t\.?)\s*([\d.]+)/gi;
+          const tabRegex = /\b(table|tab\.?|t\.?)\s*([\d.-]+)/gi;
           while ((match = tabRegex.exec(text)) !== null) {
             refs.add(`table ${match[2]}`.toLowerCase());
             refs.add(`tab ${match[2]}`.toLowerCase());

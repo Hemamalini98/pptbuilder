@@ -455,7 +455,18 @@ def extract_slide(slide, idx):
         print("Failed to extract layout shapes for slide:", idx, e)
 
     # Extract actual slide shapes
-    shapes.extend([extract_shape(s) for s in slide.shapes])
+    all_slide_shapes = []
+    def recurse(container):
+        for sh in container:
+            if sh.shape_type == 6: # Group shape (MSO_SHAPE_TYPE.GROUP = 6)
+                try:
+                    recurse(sh.shapes)
+                except Exception:
+                    pass
+            else:
+                all_slide_shapes.append(sh)
+    recurse(slide.shapes)
+    shapes.extend([extract_shape(s) for s in all_slide_shapes])
 
     # Extract background color
     bg_color = None
