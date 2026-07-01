@@ -190,19 +190,28 @@ def apply_para_style(para, style, color_scheme):
             pPr.set("marL", str(int(style["marginLeft_pt"] * PT_TO_EMU)))
 
         # Stamp template bullet char/font so the input master's circle bullet
-        # is replaced by the template's square (§ in Wingdings).
+        # is replaced by the template's square (§ in Wingdings), while preserving
+        # numbered/alphabetical lists (buAutoNum) from the input.
         if "bulletChar" in style or "bulletFont" in style:
             pPr = _get_or_create_pPr(p_el)
-            for bu_tag in [f"{{{A_NS}}}buFontTx", f"{{{A_NS}}}buFont",
-                           f"{{{A_NS}}}buChar", f"{{{A_NS}}}buAutoNum", f"{{{A_NS}}}buBlip"]:
-                for el in pPr.findall(bu_tag):
-                    pPr.remove(el)
-            if "bulletFont" in style:
-                bu_font = etree.SubElement(pPr, f"{{{A_NS}}}buFont")
-                bu_font.set("typeface", style["bulletFont"])
-            if "bulletChar" in style:
-                bu_char = etree.SubElement(pPr, f"{{{A_NS}}}buChar")
-                bu_char.set("char", style["bulletChar"])
+            has_auto_num = pPr.find(f"{{{A_NS}}}buAutoNum") is not None
+            
+            if has_auto_num:
+                # Keep auto-numbering, just clean up character/blip bullets if any exist
+                for bu_tag in [f"{{{A_NS}}}buFontTx", f"{{{A_NS}}}buChar", f"{{{A_NS}}}buBlip"]:
+                    for el in pPr.findall(bu_tag):
+                        pPr.remove(el)
+            else:
+                for bu_tag in [f"{{{A_NS}}}buFontTx", f"{{{A_NS}}}buFont",
+                               f"{{{A_NS}}}buChar", f"{{{A_NS}}}buAutoNum", f"{{{A_NS}}}buBlip"]:
+                    for el in pPr.findall(bu_tag):
+                        pPr.remove(el)
+                if "bulletFont" in style:
+                    bu_font = etree.SubElement(pPr, f"{{{A_NS}}}buFont")
+                    bu_font.set("typeface", style["bulletFont"])
+                if "bulletChar" in style:
+                    bu_char = etree.SubElement(pPr, f"{{{A_NS}}}buChar")
+                    bu_char.set("char", style["bulletChar"])
 
 
 def apply_body_properties(tf, body_props):
@@ -231,7 +240,8 @@ def apply_body_properties(tf, body_props):
 def estimate_text_overflow_scale(shape, final_style, default_font_size=18.0):
     """
     Estimate if the text inside the shape's text frame overflows its shape height.
-    Returns a scale factor <= 1.0.
+    Iteratively tries smaller font sizes (e.g., FS, FS - 2, FS - 4, ...) until it fits,
+    down to a minimum font size of 14pt. Returns the ratio (target_fs / original_fs).
     """
     if not shape.has_text_frame or not shape.width or not shape.height:
         return 1.0
@@ -239,17 +249,29 @@ def estimate_text_overflow_scale(shape, final_style, default_font_size=18.0):
     shape_w_pt = shape.width / PT_TO_EMU
     shape_h_pt = shape.height / PT_TO_EMU
 
+    # Determine original font size
+    original_fs = default_font_size
+    if final_style and "fontSize_pt" in final_style:
+        original_fs = final_style["fontSize_pt"]
+
+    import math
+    min_fs = 14.0
+    
+    # Generate candidate font sizes (e.g., 24, 22, 20, 18, 16, 14)
+    candidates = []
+    curr = float(original_fs)
+    while curr >= min_fs:
+        candidates.append(curr)
+        curr -= 2.0
+    if not candidates or candidates[-1] > min_fs:
+        candidates.append(min_fs)
+
     # Standard margins
     margin_top = 3.6
     margin_bottom = 3.6
 
-    total_text_height = margin_top + margin_bottom
-
-    for para in shape.text_frame.paragraphs:
-        # Determine font size for this paragraph/level
-        fs = default_font_size
-        if final_style and "fontSize_pt" in final_style:
-            fs = final_style["fontSize_pt"]
+    for fs in candidates:
+        total_text_height = margin_top + margin_bottom
 
         # Determine line spacing multiplier
         ls_mult = 1.2
@@ -257,31 +279,30 @@ def estimate_text_overflow_scale(shape, final_style, default_font_size=18.0):
             if "lineSpacing_pct" in final_style:
                 ls_mult = final_style["lineSpacing_pct"] / 100.0
             elif "lineSpacing_pt" in final_style:
-                ls_mult = final_style["lineSpacing_pt"] / fs
+                ls_mult = final_style["lineSpacing_pt"] / original_fs
 
         space_before = 0.0
         space_after = 0.0
         if final_style:
-            space_before = final_style.get("spaceBefore_pt", 0.0)
-            space_after = final_style.get("spaceAfter_pt", 0.0)
+            # Scale paragraph spacing proportionally with the font size
+            spacing_scale = fs / original_fs
+            space_before = final_style.get("spaceBefore_pt", 0.0) * spacing_scale
+            space_after = final_style.get("spaceAfter_pt", 0.0) * spacing_scale
 
-        # Estimate number of lines this paragraph takes
-        # Avg char width at font size fs is approx 0.42 * fs
-        char_w = fs * 0.42
-        chars_per_line = max(10.0, shape_w_pt / char_w)
-        
-        text_len = len(para.text) or 1
-        import math
-        lines = math.ceil(text_len / chars_per_line)
+        for para in shape.text_frame.paragraphs:
+            # Estimate number of lines this paragraph takes
+            char_w = fs * 0.42
+            chars_per_line = max(10.0, shape_w_pt / char_w)
+            
+            text_len = len(para.text) or 1
+            lines = math.ceil(text_len / chars_per_line)
 
-        para_height = (lines * fs * ls_mult) + space_before + space_after
-        total_text_height += para_height
+            para_height = (lines * fs * ls_mult) + space_before + space_after
+            total_text_height += para_height
 
-    if total_text_height > shape_h_pt:
-        # Calculate needed scale factor to fit
-        scale = shape_h_pt / total_text_height
-        # Clamp scale to a reasonable minimum (e.g. 0.5) so it doesn't get too tiny
-        return max(0.5, min(0.95, scale))
+        # If it fits (allowing a 5% overflow tolerance) or we are at the minimum allowed font size, return the scale factor
+        if total_text_height <= (shape_h_pt * 1.05) or fs == min_fs:
+            return fs / original_fs
 
     return 1.0
 
