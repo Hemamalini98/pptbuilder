@@ -890,7 +890,19 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
     used = []
     for slide_idx, slide in enumerate(prs.slides):
         replacements = []
-        for shape in slide.shapes:
+        all_shapes = []
+        def recurse(container):
+            for sh in container:
+                if sh.shape_type == 6: # Group shape (MSO_SHAPE_TYPE.GROUP = 6)
+                    try:
+                        recurse(sh.shapes)
+                    except Exception:
+                        pass
+                else:
+                    all_shapes.append(sh)
+        recurse(slide.shapes)
+
+        for shape in all_shapes:
             if not shape.has_text_frame:
                 continue
             text = shape.text_frame.text.strip()

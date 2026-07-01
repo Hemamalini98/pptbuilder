@@ -295,7 +295,19 @@ def collect_figure_diagnostics(input_path, extracts_dir):
         prs = Presentation(input_path)
         _FIG_PAT = re.compile(r'(figure|table)\s+([\d.-]+)', re.IGNORECASE)
         for slide in prs.slides:
-            for shape in slide.shapes:
+            all_shapes = []
+            def recurse(container):
+                for sh in container:
+                    if sh.shape_type == 6: # Group shape (MSO_SHAPE_TYPE.GROUP = 6)
+                        try:
+                            recurse(sh.shapes)
+                        except Exception:
+                            pass
+                    else:
+                        all_shapes.append(sh)
+            recurse(slide.shapes)
+            
+            for shape in all_shapes:
                 if shape.has_text_frame:
                     for m in _FIG_PAT.finditer(shape.text_frame.text):
                         requested_figs.add(f"{m.group(1).lower()} {m.group(2)}")
