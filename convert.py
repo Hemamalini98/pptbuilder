@@ -228,6 +228,64 @@ def apply_body_properties(tf, body_props):
         normAF.attrib.pop("lnSpcReduction", None)
 
 
+def estimate_text_overflow_scale(shape, final_style, default_font_size=18.0):
+    """
+    Estimate if the text inside the shape's text frame overflows its shape height.
+    Returns a scale factor <= 1.0.
+    """
+    if not shape.has_text_frame or not shape.width or not shape.height:
+        return 1.0
+
+    shape_w_pt = shape.width / PT_TO_EMU
+    shape_h_pt = shape.height / PT_TO_EMU
+
+    # Standard margins
+    margin_top = 3.6
+    margin_bottom = 3.6
+
+    total_text_height = margin_top + margin_bottom
+
+    for para in shape.text_frame.paragraphs:
+        # Determine font size for this paragraph/level
+        fs = default_font_size
+        if final_style and "fontSize_pt" in final_style:
+            fs = final_style["fontSize_pt"]
+
+        # Determine line spacing multiplier
+        ls_mult = 1.2
+        if final_style:
+            if "lineSpacing_pct" in final_style:
+                ls_mult = final_style["lineSpacing_pct"] / 100.0
+            elif "lineSpacing_pt" in final_style:
+                ls_mult = final_style["lineSpacing_pt"] / fs
+
+        space_before = 0.0
+        space_after = 0.0
+        if final_style:
+            space_before = final_style.get("spaceBefore_pt", 0.0)
+            space_after = final_style.get("spaceAfter_pt", 0.0)
+
+        # Estimate number of lines this paragraph takes
+        # Avg char width at font size fs is approx 0.42 * fs
+        char_w = fs * 0.42
+        chars_per_line = max(10.0, shape_w_pt / char_w)
+        
+        text_len = len(para.text) or 1
+        import math
+        lines = math.ceil(text_len / chars_per_line)
+
+        para_height = (lines * fs * ls_mult) + space_before + space_after
+        total_text_height += para_height
+
+    if total_text_height > shape_h_pt:
+        # Calculate needed scale factor to fit
+        scale = shape_h_pt / total_text_height
+        # Clamp scale to a reasonable minimum (e.g. 0.5) so it doesn't get too tiny
+        return max(0.5, min(0.95, scale))
+
+    return 1.0
+
+
 def apply_shape_geometry(shape, template_shape):
     """Apply position and size from a template shape dict."""
     if not template_shape:
@@ -1424,13 +1482,26 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             apply_shape_fill(shape, _first_with("fill"), color_scheme)
             apply_shape_border(shape, _first_with("border"), color_scheme)
 
-            # Body properties: layout → master fallback
             bp = (layout_ph or {}).get("textBody", {}).get("bodyProperties", {})
             if not bp and master_sh:
                 bp = master_sh.get("textBody", {}).get("bodyProperties", {})
             apply_body_properties(shape.text_frame, bp)
 
+            total_text_len = sum(len(p.text) for p in shape.text_frame.paragraphs)
+            if total_text_len > 100 or len(shape.text_frame.paragraphs) > 3:
+                try:
+                    shape.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+                except Exception:
+                    pass
+
             # Apply text styles per paragraph, using the correct bullet level for layout styles
+            font_scale = 1.0
+            if not is_title:
+                base_master = get_master_style_for_body(master_styles, 0)
+                base_layout = get_layout_style(template, layout_name, ph_idx, 0)
+                est_style = merge(base_master, base_layout, slide_style)
+                font_scale = estimate_text_overflow_scale(shape, est_style)
+
             for para in shape.text_frame.paragraphs:
                 level = para.level or 0
 
@@ -1444,6 +1515,17 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
 
                 # Build cascaded style: master → layout → slide-specific
                 final_style = merge(master_style, layout_style, slide_style)
+
+                if font_scale < 1.0 and final_style:
+                    final_style = dict(final_style)
+                    if "fontSize_pt" in final_style:
+                        final_style["fontSize_pt"] = final_style["fontSize_pt"] * font_scale
+                    if "spaceBefore_pt" in final_style:
+                        final_style["spaceBefore_pt"] = final_style["spaceBefore_pt"] * font_scale
+                    if "spaceAfter_pt" in final_style:
+                        final_style["spaceAfter_pt"] = final_style["spaceAfter_pt"] * font_scale
+                    if "lineSpacing_pt" in final_style:
+                        final_style["lineSpacing_pt"] = final_style["lineSpacing_pt"] * font_scale
 
                 apply_para_style(para, final_style, color_scheme)
 
@@ -1496,11 +1578,36 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                     bp_v = master_body.get("textBody", {}).get("bodyProperties", {})
             apply_body_properties(shape.text_frame, bp_v)
 
+            total_text_len = sum(len(p.text) for p in shape.text_frame.paragraphs)
+            if total_text_len > 100 or len(shape.text_frame.paragraphs) > 3:
+                try:
+                    shape.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+                except Exception:
+                    pass
+
+            est_style_v = {}
+            base_master_v = get_master_style_for_body(master_styles, 0)
+            base_layout_v = get_layout_style(template, layout_name, virtual_idx, 0)
+            est_style_v = merge(base_master_v, base_layout_v, {})
+            font_scale_v = estimate_text_overflow_scale(shape, est_style_v)
+
             for para in shape.text_frame.paragraphs:
                 level = para.level or 0
                 master_style = get_master_style_for_body(master_styles, level)
                 layout_style = get_layout_style(template, layout_name, virtual_idx, level)
                 final_style = merge(master_style, layout_style, {})
+
+                if font_scale_v < 1.0 and final_style:
+                    final_style = dict(final_style)
+                    if "fontSize_pt" in final_style:
+                        final_style["fontSize_pt"] = final_style["fontSize_pt"] * font_scale_v
+                    if "spaceBefore_pt" in final_style:
+                        final_style["spaceBefore_pt"] = final_style["spaceBefore_pt"] * font_scale_v
+                    if "spaceAfter_pt" in final_style:
+                        final_style["spaceAfter_pt"] = final_style["spaceAfter_pt"] * font_scale_v
+                    if "lineSpacing_pt" in final_style:
+                        final_style["lineSpacing_pt"] = final_style["lineSpacing_pt"] * font_scale_v
+
                 apply_para_style(para, final_style, color_scheme)
                 for run in para.runs:
                     apply_run_style(run, final_style, color_scheme, font_scheme)
