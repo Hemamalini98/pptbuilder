@@ -844,7 +844,7 @@ def fix_cover_title(slide):
 
 # ── EXTRACTED IMAGE INSERTION ────────────────────────────────────────────────
 
-_FIG_PAT = re.compile(r'(figure|table)\s+([\d.-]+)', re.IGNORECASE)
+_FIG_PAT = re.compile(r'insert\s+(figure|table)\s+([\d.-]+)', re.IGNORECASE)
 
 
 def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=None):

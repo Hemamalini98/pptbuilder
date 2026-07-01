@@ -293,7 +293,7 @@ def collect_figure_diagnostics(input_path, extracts_dir):
     requested_figs = set()
     try:
         prs = Presentation(input_path)
-        _FIG_PAT = re.compile(r'(figure|table)\s+([\d.-]+)', re.IGNORECASE)
+        _FIG_PAT = re.compile(r'insert\s+(figure|table)\s+([\d.-]+)', re.IGNORECASE)
         for slide in prs.slides:
             all_shapes = []
             def recurse(container):
