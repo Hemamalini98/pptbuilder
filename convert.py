@@ -1420,8 +1420,27 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                 final_style = merge(master_style, layout_style, slide_style)
 
                 apply_para_style(para, final_style, color_scheme)
-                for run in para.runs:
-                    apply_run_style(run, final_style, color_scheme, font_scheme)
+
+                if is_title:
+                    pattern = re.compile(r"(\(\d+\s+[oO][fF]\s+\d+\)|\(\s*[cC][oO][nN][tT][a-zA-Z.]*\s*\))")
+                    text = para.text
+                    parts = pattern.split(text)
+                    if len(parts) > 1:
+                        para.text = ""
+                        for part in parts:
+                            if not part:
+                                continue
+                            run = para.add_run()
+                            run.text = part
+                            apply_run_style(run, final_style, color_scheme, font_scheme)
+                            if pattern.match(part):
+                                run.font.size = Pt(20)
+                    else:
+                        for run in para.runs:
+                            apply_run_style(run, final_style, color_scheme, font_scheme)
+                else:
+                    for run in para.runs:
+                        apply_run_style(run, final_style, color_scheme, font_scheme)
 
         # Handle non-placeholder text boxes as virtual content placeholders.
         # (nonph_text_shapes and real_ph_indices were collected before
