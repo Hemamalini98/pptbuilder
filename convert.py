@@ -229,82 +229,13 @@ def apply_body_properties(tf, body_props):
             if key in body_props:
                 bodyPr.set(attr, str(int(body_props[key] * PT_TO_EMU)))
 
-    # Reset normAutofit scaling — the input may have been shrunk to fit larger
-    # fonts; after we stamp template-sized fonts the text fits at 100%.
-    normAF = bodyPr.find(f"{{{A_NS}}}normAutofit")
-    if normAF is not None:
-        normAF.attrib.pop("fontScale", None)
-        normAF.attrib.pop("lnSpcReduction", None)
+    # Force normAutofit scaling so PowerPoint automatically scales text down to prevent overflow.
+    # Remove any existing autofit tags to avoid conflicting definitions.
+    for af_tag in [f"{{{A_NS}}}normAutofit", f"{{{A_NS}}}spAutoFit", f"{{{A_NS}}}noAutofit"]:
+        for old in bodyPr.findall(af_tag):
+            bodyPr.remove(old)
+    etree.SubElement(bodyPr, f"{{{A_NS}}}normAutofit")
 
-
-def estimate_text_overflow_scale(shape, final_style, default_font_size=18.0):
-    """
-    Estimate if the text inside the shape's text frame overflows its shape height.
-    Iteratively tries smaller font sizes (e.g., FS, FS - 2, FS - 4, ...) until it fits,
-    down to a minimum font size of 14pt. Returns the ratio (target_fs / original_fs).
-    """
-    if not shape.has_text_frame or not shape.width or not shape.height:
-        return 1.0
-
-    shape_w_pt = shape.width / PT_TO_EMU
-    shape_h_pt = shape.height / PT_TO_EMU
-
-    # Determine original font size
-    original_fs = default_font_size
-    if final_style and "fontSize_pt" in final_style:
-        original_fs = final_style["fontSize_pt"]
-
-    import math
-    min_fs = 14.0
-    
-    # Generate candidate font sizes (e.g., 24, 22, 20, 18, 16, 14)
-    candidates = []
-    curr = float(original_fs)
-    while curr >= min_fs:
-        candidates.append(curr)
-        curr -= 2.0
-    if not candidates or candidates[-1] > min_fs:
-        candidates.append(min_fs)
-
-    # Standard margins
-    margin_top = 3.6
-    margin_bottom = 3.6
-
-    for fs in candidates:
-        total_text_height = margin_top + margin_bottom
-
-        # Determine line spacing multiplier
-        ls_mult = 1.2
-        if final_style:
-            if "lineSpacing_pct" in final_style:
-                ls_mult = final_style["lineSpacing_pct"] / 100.0
-            elif "lineSpacing_pt" in final_style:
-                ls_mult = final_style["lineSpacing_pt"] / original_fs
-
-        space_before = 0.0
-        space_after = 0.0
-        if final_style:
-            # Scale paragraph spacing proportionally with the font size
-            spacing_scale = fs / original_fs
-            space_before = final_style.get("spaceBefore_pt", 0.0) * spacing_scale
-            space_after = final_style.get("spaceAfter_pt", 0.0) * spacing_scale
-
-        for para in shape.text_frame.paragraphs:
-            # Estimate number of lines this paragraph takes
-            char_w = fs * 0.42
-            chars_per_line = max(10.0, shape_w_pt / char_w)
-            
-            text_len = len(para.text) or 1
-            lines = math.ceil(text_len / chars_per_line)
-
-            para_height = (lines * fs * ls_mult) + space_before + space_after
-            total_text_height += para_height
-
-        # If it fits (allowing a 5% overflow tolerance) or we are at the minimum allowed font size, return the scale factor
-        if total_text_height <= (shape_h_pt * 1.05) or fs == min_fs:
-            return fs / original_fs
-
-    return 1.0
 
 
 def apply_shape_geometry(shape, template_shape):
@@ -1390,6 +1321,102 @@ def find_cover_image(input_path, explicit_cover=None):
     return candidates[0] if candidates else None
 
 
+def fix_overflowing_textboxes(prs):
+    """
+    Detect slide text boxes and content placeholders for potential overflow
+    and scale down font sizes to fit the shape height.
+    """
+    import math
+    for slide_idx, slide in enumerate(prs.slides):
+        for shape in slide.shapes:
+            if not shape.has_text_frame or not shape.text_frame.text.strip():
+                continue
+            
+            # Skip title shapes because they are handled by fix_cover_title or don't need scaling down
+            try:
+                if shape.is_placeholder and str(shape.placeholder_format.type) in ["TITLE (1)", "CENTER_TITLE (3)"]:
+                    continue
+            except Exception:
+                pass
+            
+            tf = shape.text_frame
+            width_pt = shape.width / 12700
+            height_pt = shape.height / 12700
+            
+            # Read margins
+            txBody = tf._txBody
+            bodyPr = txBody.find(f"{{{A_NS}}}bodyPr")
+            lIns = 10.0
+            rIns = 10.0
+            tIns = 5.0
+            bIns = 5.0
+            if bodyPr is not None:
+                if bodyPr.get("lIns") is not None: lIns = int(bodyPr.get("lIns")) / 12700
+                if bodyPr.get("rIns") is not None: rIns = int(bodyPr.get("rIns")) / 12700
+                if bodyPr.get("tIns") is not None: tIns = int(bodyPr.get("tIns")) / 12700
+                if bodyPr.get("bIns") is not None: bIns = int(bodyPr.get("bIns")) / 12700
+            
+            avail_w = max(50.0, width_pt - lIns - rIns)
+            avail_h = max(20.0, height_pt - tIns - bIns)
+            
+            # Estimate text height at current font sizes
+            total_est_h = 0.0
+            para_details = [] # list of (para, current_font_size)
+            
+            for para in tf.paragraphs:
+                # Find font size (default to 20pt if not specified)
+                pt_sz = 20.0
+                if para.runs:
+                    for r in para.runs:
+                        if r.font.size is not None:
+                            pt_sz = r.font.size.pt
+                            break
+                elif para.font.size is not None:
+                    pt_sz = para.font.size.pt
+                
+                text = para.text
+                if not text.strip():
+                    continue
+                
+                # Estimate line count: average char width is ~0.38 of font size
+                char_w = pt_sz * 0.38
+                est_text_w = len(text) * char_w
+                lines = max(1.0, math.ceil(est_text_w / avail_w))
+                
+                # Space before / after / line spacing
+                sb = 0.0
+                sa = Pt(6).pt # default space after
+                if para.space_before is not None:
+                    sb = para.space_before.pt
+                if para.space_after is not None:
+                    sa = para.space_after.pt
+                
+                # line spacing factor
+                ls = 1.15
+                if para.line_spacing is not None:
+                    if isinstance(para.line_spacing, float):
+                        ls = para.line_spacing
+                    else:
+                        ls = para.line_spacing.pt / pt_sz
+                
+                para_h = lines * (pt_sz * ls) + sb + sa
+                total_est_h += para_h
+                para_details.append((para, pt_sz, para_h))
+            
+            if total_est_h > avail_h and para_details:
+                # Calculate scale factor
+                scale = avail_h / total_est_h
+                # Let's scale down font sizes
+                for para, orig_sz, _ in para_details:
+                    new_sz = max(10.0, orig_sz * scale)
+                    # Apply new size to all runs in paragraph
+                    for r in para.runs:
+                        r.font.size = Pt(new_sz)
+                    # If paragraph has no runs but has text, set font size on paragraph
+                    if not para.runs:
+                        para.font.size = Pt(new_sz)
+
+
 def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None, figures_metadata=None):
     """
     Apply template styles to input.pptx and save as output.pptx.
@@ -1508,21 +1535,6 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                 bp = master_sh.get("textBody", {}).get("bodyProperties", {})
             apply_body_properties(shape.text_frame, bp)
 
-            total_text_len = sum(len(p.text) for p in shape.text_frame.paragraphs)
-            if total_text_len > 100 or len(shape.text_frame.paragraphs) > 3:
-                try:
-                    shape.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-                except Exception:
-                    pass
-
-            # Apply text styles per paragraph, using the correct bullet level for layout styles
-            font_scale = 1.0
-            if not is_title:
-                base_master = get_master_style_for_body(master_styles, 0)
-                base_layout = get_layout_style(template, layout_name, ph_idx, 0)
-                est_style = merge(base_master, base_layout, slide_style)
-                font_scale = estimate_text_overflow_scale(shape, est_style)
-
             for para in shape.text_frame.paragraphs:
                 level = para.level or 0
 
@@ -1536,17 +1548,6 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
 
                 # Build cascaded style: master → layout → slide-specific
                 final_style = merge(master_style, layout_style, slide_style)
-
-                if font_scale < 1.0 and final_style:
-                    final_style = dict(final_style)
-                    if "fontSize_pt" in final_style:
-                        final_style["fontSize_pt"] = final_style["fontSize_pt"] * font_scale
-                    if "spaceBefore_pt" in final_style:
-                        final_style["spaceBefore_pt"] = final_style["spaceBefore_pt"] * font_scale
-                    if "spaceAfter_pt" in final_style:
-                        final_style["spaceAfter_pt"] = final_style["spaceAfter_pt"] * font_scale
-                    if "lineSpacing_pt" in final_style:
-                        final_style["lineSpacing_pt"] = final_style["lineSpacing_pt"] * font_scale
 
                 apply_para_style(para, final_style, color_scheme)
 
@@ -1599,35 +1600,11 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                     bp_v = master_body.get("textBody", {}).get("bodyProperties", {})
             apply_body_properties(shape.text_frame, bp_v)
 
-            total_text_len = sum(len(p.text) for p in shape.text_frame.paragraphs)
-            if total_text_len > 100 or len(shape.text_frame.paragraphs) > 3:
-                try:
-                    shape.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-                except Exception:
-                    pass
-
-            est_style_v = {}
-            base_master_v = get_master_style_for_body(master_styles, 0)
-            base_layout_v = get_layout_style(template, layout_name, virtual_idx, 0)
-            est_style_v = merge(base_master_v, base_layout_v, {})
-            font_scale_v = estimate_text_overflow_scale(shape, est_style_v)
-
             for para in shape.text_frame.paragraphs:
                 level = para.level or 0
                 master_style = get_master_style_for_body(master_styles, level)
                 layout_style = get_layout_style(template, layout_name, virtual_idx, level)
                 final_style = merge(master_style, layout_style, {})
-
-                if font_scale_v < 1.0 and final_style:
-                    final_style = dict(final_style)
-                    if "fontSize_pt" in final_style:
-                        final_style["fontSize_pt"] = final_style["fontSize_pt"] * font_scale_v
-                    if "spaceBefore_pt" in final_style:
-                        final_style["spaceBefore_pt"] = final_style["spaceBefore_pt"] * font_scale_v
-                    if "spaceAfter_pt" in final_style:
-                        final_style["spaceAfter_pt"] = final_style["spaceAfter_pt"] * font_scale_v
-                    if "lineSpacing_pt" in final_style:
-                        final_style["lineSpacing_pt"] = final_style["lineSpacing_pt"] * font_scale_v
 
                 apply_para_style(para, final_style, color_scheme)
                 for run in para.runs:
@@ -1636,6 +1613,9 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
         # Cover slide post-fix: correct CENTER_TITLE size after normal styling.
         if slide_idx == 0:
             fix_cover_title(slide)
+
+    # Automatically fix and shrink any overflowing textboxes to fit the shapes
+    fix_overflowing_textboxes(prs)
 
     input_dir = os.path.dirname(os.path.abspath(input_path))
     used_figs = insert_figure_placeholders(prs, input_dir, figures_metadata, template=template)
