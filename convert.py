@@ -1438,32 +1438,32 @@ def fix_overflowing_textboxes(prs):
                             break
                 elif para.font.size is not None:
                     pt_sz = para.font.size.pt
-                
-                text = para.text
-                if not text.strip():
-                    continue
-                
-                # Estimate line count: average char width is ~0.38 of font size
-                char_w = pt_sz * 0.38
-                est_text_w = len(text) * char_w
-                lines = max(1.0, math.ceil(est_text_w / avail_w))
-                
+
                 # Space before / after / line spacing
                 sb = 0.0
-                sa = Pt(6).pt # default space after
+                sa = Pt(6).pt
                 if para.space_before is not None:
                     sb = para.space_before.pt
                 if para.space_after is not None:
                     sa = para.space_after.pt
-                
-                # line spacing factor
                 ls = 1.15
                 if para.line_spacing is not None:
                     if isinstance(para.line_spacing, float):
                         ls = para.line_spacing
                     else:
                         ls = para.line_spacing.pt / pt_sz
-                
+
+                text = para.text
+                if not text.strip():
+                    # Blank paragraph still contributes one line of vertical space
+                    total_est_h += (pt_sz * ls) + sb + sa
+                    continue
+
+                # Estimate line count: average char width is ~0.38 of font size
+                char_w = pt_sz * 0.38
+                est_text_w = len(text) * char_w
+                lines = max(1.0, math.ceil(est_text_w / avail_w))
+
                 para_h = lines * (pt_sz * ls) + sb + sa
                 total_est_h += para_h
                 para_details.append((para, pt_sz, para_h))
@@ -1756,15 +1756,15 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
         if slide_idx == 0:
             fix_cover_title(slide)
 
-    # Automatically fix and shrink any overflowing textboxes to fit the shapes
-    fix_overflowing_textboxes(prs)
-
     input_dir = os.path.dirname(os.path.abspath(input_path))
     used_figs = insert_figure_placeholders(prs, input_dir, figures_metadata, template=template, include_figure_captions=include_figure_captions, include_table_captions=include_table_captions)
 
     # Insert remaining loose figure extracts at the end
     skip_names = {x["dest_name"] for x in used_figs}
     insert_extracted_images(prs, input_dir, skip=skip_names)
+
+    # Fix overflowing textboxes after all shapes (including captions) are inserted
+    fix_overflowing_textboxes(prs)
 
     prs.save(output_path)
     print(f"\nDone. Saved to: {output_path}")
