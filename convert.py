@@ -1175,9 +1175,9 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
 
             # Insert Caption Textbox if text exists
             if caption_text and pic:
-                # Force caption bounds to match actual final placed image bounds
+                # Start at image's left edge; extend to the right edge of the placeholder
                 cap_left = pic.left
-                cap_width = pic.width
+                cap_width = (left + w) - pic.left
 
                 # 1. Determine font sizes first
                 adjusted_font_size = font_size_pt
@@ -1551,6 +1551,7 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             s for s in slide.shapes
             if not s.is_placeholder and s.has_text_frame
             and any(p.text.strip() for p in s.text_frame.paragraphs)
+            and not _FIG_PAT.search(s.text_frame.text)
         ]
 
         # Apply background: layout-specific fill takes priority, fall back to master background
@@ -1566,6 +1567,11 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
 
         # Collect placeholder indices present on this slide
         present_indices = {sh.placeholder_format.idx for sh in slide.shapes if sh.is_placeholder and sh.placeholder_format is not None}
+
+        # Layout placeholder lookup used by geometry merge logic in both loops below
+        _layout_for_slide = next(
+            (l for l in template["slideLayouts"] if l["layoutName"] == layout_name), {}
+        )
 
         for shape in slide.shapes:
             if not shape.is_placeholder or not shape.has_text_frame:
@@ -1591,7 +1597,30 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                         if src and src.get("position") and src.get("size"):
                             return src
                     return None
-                apply_shape_geometry(shape, _first_geo())
+                geo = _first_geo()
+                # Merge any unoccupied adjacent slot directly above so this shape
+                # aligns with sibling placeholders (e.g. figure) at the same y.
+                orig_ph_idx = shape.placeholder_format.idx
+                other_ph_indices = present_indices - {orig_ph_idx}
+                if geo and geo.get("position") and geo.get("size"):
+                    body_y = geo["position"]["y_pt"]
+                    body_h = geo["size"]["height_pt"]
+                    for _adj in _layout_for_slide.get("placeholders", []):
+                        _adj_idx = _adj.get("placeholder", {}).get("idx")
+                        if _adj_idx in other_ph_indices or _adj_idx == ph_idx:
+                            continue
+                        _adj_y = (_adj.get("position") or {}).get("y_pt")
+                        _adj_h = (_adj.get("size") or {}).get("height_pt")
+                        if _adj_y is None or _adj_h is None or _adj_y >= body_y:
+                            continue
+                        if abs((_adj_y + _adj_h) - body_y) <= 15:
+                            geo = {
+                                "position": {"x_pt": geo["position"]["x_pt"], "y_pt": _adj_y},
+                                "size": {"width_pt": geo["size"]["width_pt"],
+                                         "height_pt": (body_y + body_h) - _adj_y}
+                            }
+                            break
+                apply_shape_geometry(shape, geo)
 
             # Fill and border: cascade slide → layout → master (first source that has the key wins)
             def _first_with(key):
@@ -1649,9 +1678,26 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
         # (nonph_text_shapes and real_ph_indices were collected before
         # add_decorative_shapes so that cloned master shapes like the copyright
         # rectangle are never treated as virtual content placeholders.)
+        # Build a pool of layout placeholder slots not already occupied by real placeholders,
+        # filtering out tiny "column header" slots (height < 60pt) so body text boxes
+        # are never squeezed into them regardless of the template's layout naming.
+        _MIN_BODY_SLOT_PT = 60
+        _body_slot_pool = [
+            ph.get("placeholder", {}).get("idx")
+            for ph in sorted(
+                _layout_for_slide.get("placeholders", []),
+                key=lambda p: p.get("placeholder", {}).get("idx", 999)
+            )
+            if ph.get("placeholder", {}).get("idx") not in real_ph_indices
+            and (ph.get("size") or {}).get("height_pt", 999) >= _MIN_BODY_SLOT_PT
+        ]
+
         virtual_start = (max(real_ph_indices) + 1) if real_ph_indices else 2
         for v_offset, shape in enumerate(nonph_text_shapes):
-            virtual_idx = virtual_start + v_offset
+            if v_offset < len(_body_slot_pool):
+                virtual_idx = _body_slot_pool[v_offset]
+            else:
+                virtual_idx = virtual_start + v_offset
             layout_ph_v = get_layout_ph(template, layout_name, virtual_idx)
             master_sh_v = get_master_shape(template, virtual_idx)
 
@@ -1664,7 +1710,30 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                         if src and src.get("position") and src.get("size"):
                             return src
                     return None
-                apply_shape_geometry(shape, _first_geo_v())
+                geo = _first_geo_v()
+                # If there's an unoccupied layout slot whose bottom edge sits just
+                # above this slot's top, merge them so the text box starts at the
+                # same y as sibling placeholders (e.g. the figure on the right).
+                if geo and geo.get("position") and geo.get("size"):
+                    body_y = geo["position"]["y_pt"]
+                    body_h = geo["size"]["height_pt"]
+                    for _adj in _layout_for_slide.get("placeholders", []):
+                        _adj_idx = _adj.get("placeholder", {}).get("idx")
+                        if _adj_idx in real_ph_indices or _adj_idx == virtual_idx:
+                            continue
+                        _adj_y = (_adj.get("position") or {}).get("y_pt")
+                        _adj_h = (_adj.get("size") or {}).get("height_pt")
+                        if _adj_y is None or _adj_h is None or _adj_y >= body_y:
+                            continue
+                        if abs((_adj_y + _adj_h) - body_y) <= 15:  # slots are contiguous
+                            merged_y = _adj_y
+                            geo = {
+                                "position": {"x_pt": geo["position"]["x_pt"], "y_pt": merged_y},
+                                "size": {"width_pt": geo["size"]["width_pt"],
+                                         "height_pt": (body_y + body_h) - merged_y}
+                            }
+                            break
+                apply_shape_geometry(shape, geo)
 
             bp_v = (layout_ph_v or {}).get("textBody", {}).get("bodyProperties", {})
             if not bp_v:
