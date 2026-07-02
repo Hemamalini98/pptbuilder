@@ -563,7 +563,7 @@ export const Step3Figures: React.FC = () => {
                       const matchingCaption = pdfCaptions.find(c => c.text === selectedVal);
                       if (matchingCaption) {
                         renameFigure(fig.id, matchingCaption.label);
-                        updateFigureCaption(fig.id, matchingCaption.text, matchingCaption.credit);
+                        updateFigureCaption(fig.id, matchingCaption.text, matchingCaption.credit, matchingCaption.runs, matchingCaption.creditRuns);
                       } else {
                         updateFigureCaption(fig.id, "", "");
                       }

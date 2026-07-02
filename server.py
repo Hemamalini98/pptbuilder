@@ -125,51 +125,100 @@ async def startup_event():
 
 
 
+def _span_style(span):
+    """Return (bold, italic) booleans from a PyMuPDF span dict."""
+    flags = span.get("flags", 0)
+    font_name = span.get("font", "").lower()
+    bold = bool(flags & 16) or "bold" in font_name
+    italic = bool(flags & 2) or "italic" in font_name or "oblique" in font_name
+    return bold, italic
+
+
+def _block_runs(block):
+    """Extract list of {text, bold, italic} runs from a PyMuPDF dict block."""
+    runs = []
+    for line in block.get("lines", []):
+        for span in line.get("spans", []):
+            text = span.get("text", "")
+            if text:
+                bold, italic = _span_style(span)
+                runs.append({"text": text, "bold": bold, "italic": italic})
+    return runs
+
+
+def _block_plain(block):
+    """Return plain text string from a PyMuPDF dict block."""
+    return " ".join(
+        span.get("text", "")
+        for line in block.get("lines", [])
+        for span in line.get("spans", [])
+    ).strip()
+
+
 def extract_pdf_captions(pdf_path):
-    import re
     captions = []
     pattern = re.compile(r"^\s*(Figure|Fig\.|Table)\s+(\d+[-.\d]*)\b", re.IGNORECASE)
-    credit_pattern = re.compile(r"^\s*(©|Copyright\b|Courtesy of\b|Source:\b|Source\b|Reproduced from\b|Reproduced with permission\b|Data from\b|Courtesy\b|Permission\b)", re.IGNORECASE)
-    
+    credit_pattern = re.compile(
+        r"^\s*(©|Copyright\b|Courtesy of\b|Source:\b|Source\b|Reproduced from\b|"
+        r"Reproduced with permission\b|Data from\b|Courtesy\b|Permission\b)",
+        re.IGNORECASE,
+    )
+
     if not os.path.exists(pdf_path):
         return captions
-        
+
     try:
         doc = fitz.open(pdf_path)
         for page_idx in range(len(doc)):
             page = doc[page_idx]
-            blocks = page.get_text("blocks")
-            for b_idx, b in enumerate(blocks):
-                text = b[4].strip()
-                if not text:
+            # Use dict mode so we get per-span font flags
+            page_data = page.get_text("dict")
+            blocks = [b for b in page_data.get("blocks", []) if b.get("type") == 0]
+
+            for b_idx, block in enumerate(blocks):
+                plain = _block_plain(block)
+                if not plain:
                     continue
-                lines = text.split("\n")
+
+                lines = plain.split("\n") if "\n" in plain else plain.splitlines()
+                # Recompute from actual line structure
+                lines = []
+                for line in block.get("lines", []):
+                    line_text = " ".join(s.get("text", "") for s in line.get("spans", [])).strip()
+                    if line_text:
+                        lines.append(line_text)
+
                 for line_idx, line in enumerate(lines):
-                    line = line.strip()
-                    match = pattern.match(line)
+                    match = pattern.match(line.strip())
                     if match:
-                        caption_lines = lines[line_idx:]
-                        full_caption = " ".join(caption_lines)
+                        full_caption = " ".join(lines[line_idx:])
                         clean_text = " ".join(full_caption.split())
-                        
-                        # Check if the next block contains a credit/source line
+
+                        # Runs for this block (all spans = caption text)
+                        cap_runs = _block_runs(block)
+
+                        # Credit: look at the next text block
                         credit_text = ""
-                        if b_idx + 1 < len(blocks):
-                            next_text = blocks[b_idx + 1][4].strip()
-                            if credit_pattern.match(next_text):
-                                credit_text = " ".join(next_text.split())
-                        
+                        credit_runs = []
+                        for nb in blocks[b_idx + 1: b_idx + 3]:
+                            nb_plain = _block_plain(nb)
+                            if credit_pattern.match(nb_plain):
+                                credit_text = " ".join(nb_plain.split())
+                                credit_runs = _block_runs(nb)
+                            break
+
                         cap_type = match.group(1).capitalize()
                         if cap_type.startswith("Fig"):
                             cap_type = "Figure"
-                        normalized_label = f"{cap_type} {match.group(2)}"
-                        
+
                         captions.append({
                             "id": f"cap_{page_idx}_{b_idx}_{line_idx}",
                             "page": page_idx + 1,
-                            "label": normalized_label,
+                            "label": f"{cap_type} {match.group(2)}",
                             "text": clean_text,
-                            "credit": credit_text
+                            "runs": cap_runs,
+                            "credit": credit_text,
+                            "creditRuns": credit_runs,
                         })
                         break
         doc.close()
@@ -538,6 +587,7 @@ async def add_image(
     w_pt: float = Form(...),
     h_pt: float = Form(...),
     caption: str = Form(None),
+    caption_runs: str = Form(None),
     session_id: str = Depends(get_session_id)
 ):
     state = get_session_state(session_id)
@@ -580,9 +630,24 @@ async def add_image(
             tf = txBox.text_frame
             tf.word_wrap = True
             p = tf.paragraphs[0]
-            p.text = caption
-            p.font.size = Pt(10)
-            p.font.italic = True
+            runs_data = None
+            if caption_runs:
+                try:
+                    runs_data = json.loads(caption_runs)
+                except Exception:
+                    pass
+            if runs_data:
+                for run_data in runs_data:
+                    run = p.add_run()
+                    run.text = run_data.get("text", "")
+                    run.font.size = Pt(10)
+                    run.font.bold = run_data.get("bold", False)
+                    run.font.italic = run_data.get("italic", True)
+            else:
+                run = p.add_run()
+                run.text = caption
+                run.font.size = Pt(10)
+                run.font.italic = True
             
         prs.save(target_pptx)
         

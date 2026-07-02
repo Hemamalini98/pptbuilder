@@ -860,6 +860,39 @@ def fix_cover_title(slide):
 _FIG_PAT = re.compile(r'insert\s+(figure|table)\s+([\d.-]+)', re.IGNORECASE)
 
 
+def _add_styled_runs(p, runs, font_size_pt, font_family, font_color, template,
+                     fallback_bold=False, fallback_italic=False):
+    """Add per-run styled text to a python-pptx paragraph, preserving bold/italic from PDF."""
+    color_scheme = template.get("theme", {}).get("colorScheme", {}) if template else {}
+    font_scheme = template.get("theme", {}).get("fontScheme", {}) if template else {}
+
+    resolved_family = None
+    if font_family:
+        if font_family in THEME_FONTS:
+            key = THEME_FONT_KEY.get(font_family, "minor")
+            resolved_family = font_scheme.get(key) if font_scheme else None
+        else:
+            resolved_family = font_family
+
+    resolved_color = None
+    if font_color:
+        resolved_color = resolve_color(font_color, color_scheme)
+
+    for run_data in runs:
+        run = p.add_run()
+        run.text = run_data.get("text", "")
+        run.font.size = Pt(font_size_pt)
+        run.font.bold = run_data.get("bold", fallback_bold)
+        run.font.italic = run_data.get("italic", fallback_italic)
+        if resolved_family:
+            run.font.name = resolved_family
+        if resolved_color:
+            try:
+                run.font.color.rgb = resolved_color
+            except Exception:
+                pass
+
+
 def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=None, include_figure_captions=True, include_table_captions=True):
     """
     Scan every slide for shapes whose text matches 'Figure X.X' (e.g. 'Insert Figure 2.1 here').
@@ -881,9 +914,11 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
     if not fig_map:
         return []
 
-    # Build caption & credit maps: normalized figure key -> caption / credit text
+    # Build caption & credit maps: normalized figure key -> text / runs
     caption_map = {}
     credit_map = {}
+    caption_runs_map = {}
+    credit_runs_map = {}
     if figures_metadata:
         for fig in figures_metadata:
             name = fig.get("name")
@@ -899,6 +934,10 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                     caption_map[key] = caption
                 if credit:
                     credit_map[key] = credit
+                if fig.get("captionRuns"):
+                    caption_runs_map[key] = fig["captionRuns"]
+                if fig.get("creditRuns"):
+                    credit_runs_map[key] = fig["creditRuns"]
 
     used = []
     for slide_idx, slide in enumerate(prs.slides):
@@ -983,15 +1022,21 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                     caption_text = original_text
 
             credit_text = credit_map.get(fig_key)
+            caption_runs = caption_runs_map.get(fig_key)
+            credit_runs = credit_runs_map.get(fig_key)
 
             # Suppress caption/credit based on caller flags
             _fig_type = fig_key.split()[0] if fig_key else ""
             if _fig_type == "figure" and not include_figure_captions:
                 caption_text = None
                 credit_text = None
+                caption_runs = None
+                credit_runs = None
             elif _fig_type == "table" and not include_table_captions:
                 caption_text = None
                 credit_text = None
+                caption_runs = None
+                credit_runs = None
 
             # Pre-resolve caption and credit styles to estimate required heights
             font_size_pt = 18.0
@@ -1188,29 +1233,33 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                 except Exception:
                     pass
                 p = tf.paragraphs[0]
-                p.text = caption_text
-                p.font.size = Pt(adjusted_font_size)
-                p.font.italic = font_italic
-                p.font.bold = font_bold
-
-                if font_family:
-                    if font_family in THEME_FONTS:
-                        key = THEME_FONT_KEY.get(font_family, "minor")
-                        font_scheme = template.get("theme", {}).get("fontScheme", {})
-                        resolved_fn = font_scheme.get(key) if font_scheme else None
-                        if resolved_fn:
-                            p.font.name = resolved_fn
-                    else:
-                        p.font.name = font_family
-
-                if font_color:
-                    color_scheme = template.get("theme", {}).get("colorScheme", {})
-                    rgb = resolve_color(font_color, color_scheme)
-                    if rgb:
-                        try:
-                            p.font.color.rgb = rgb
-                        except Exception:
-                            pass
+                if caption_runs:
+                    _add_styled_runs(p, caption_runs, adjusted_font_size,
+                                     font_family, font_color, template,
+                                     fallback_bold=font_bold, fallback_italic=font_italic)
+                else:
+                    run = p.add_run()
+                    run.text = caption_text
+                    run.font.size = Pt(adjusted_font_size)
+                    run.font.bold = font_bold
+                    run.font.italic = font_italic
+                    if font_family:
+                        if font_family in THEME_FONTS:
+                            key = THEME_FONT_KEY.get(font_family, "minor")
+                            font_scheme = template.get("theme", {}).get("fontScheme", {})
+                            resolved_fn = font_scheme.get(key) if font_scheme else None
+                            if resolved_fn:
+                                run.font.name = resolved_fn
+                        else:
+                            run.font.name = font_family
+                    if font_color:
+                        color_scheme = template.get("theme", {}).get("colorScheme", {})
+                        rgb = resolve_color(font_color, color_scheme)
+                        if rgb:
+                            try:
+                                run.font.color.rgb = rgb
+                            except Exception:
+                                pass
 
                 # 5. Create separate Credit Box if it exists
                 if credit_text:
@@ -1226,20 +1275,24 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                     except Exception:
                         pass
                     p_cred = tf_cred.paragraphs[0]
-                    p_cred.text = credit_text
-                    
-                    p_cred.font.size = Pt(adjusted_cred_font_size)
-                    p_cred.font.italic = cred_italic
-                    p_cred.font.bold = cred_bold
-
-                    if cred_font_family in THEME_FONTS:
-                        key = THEME_FONT_KEY.get(cred_font_family, "minor")
-                        font_scheme = template.get("theme", {}).get("fontScheme", {})
-                        resolved_fn = font_scheme.get(key) if font_scheme else None
-                        if resolved_fn:
-                            p_cred.font.name = resolved_fn
+                    if credit_runs:
+                        _add_styled_runs(p_cred, credit_runs, adjusted_cred_font_size,
+                                         cred_font_family, cred_color, template,
+                                         fallback_bold=cred_bold, fallback_italic=cred_italic)
                     else:
-                        p_cred.font.name = cred_font_family
+                        run_cred = p_cred.add_run()
+                        run_cred.text = credit_text
+                        run_cred.font.size = Pt(adjusted_cred_font_size)
+                        run_cred.font.italic = cred_italic
+                        run_cred.font.bold = cred_bold
+                        if cred_font_family in THEME_FONTS:
+                            key = THEME_FONT_KEY.get(cred_font_family, "minor")
+                            font_scheme = template.get("theme", {}).get("fontScheme", {})
+                            resolved_fn = font_scheme.get(key) if font_scheme else None
+                            if resolved_fn:
+                                run_cred.font.name = resolved_fn
+                        else:
+                            run_cred.font.name = cred_font_family
 
                     if cred_color:
                         color_scheme = template.get("theme", {}).get("colorScheme", {})

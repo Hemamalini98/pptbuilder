@@ -65,6 +65,12 @@ export interface StylesData {
   theme?: any;
 }
 
+export interface RunData {
+  text: string;
+  bold: boolean;
+  italic: boolean;
+}
+
 export interface Figure {
   id: string;
   name: string; // e.g. Figure2.3
@@ -72,7 +78,9 @@ export interface Figure {
   page: number; // 1-indexed
   filename: string; // unique identifier in backend uploads
   caption?: string; // extracted figure caption
+  captionRuns?: RunData[]; // per-run bold/italic from PDF
   credit?: string;  // extracted figure credit
+  creditRuns?: RunData[]; // per-run bold/italic from PDF
   mappedTo?: {
     slideIndex: number;
     shapeIndex: number;
@@ -84,7 +92,9 @@ export interface PdfCaption {
   page: number; // 1-indexed
   label: string; // e.g. "Figure 1.1" or "Table 1"
   text: string;  // full caption text
+  runs?: RunData[]; // per-run bold/italic styling from PDF
   credit?: string; // credit text
+  creditRuns?: RunData[]; // per-run bold/italic for credit
 }
 
 interface StoredTemplate {
@@ -127,7 +137,7 @@ interface DeckforgeState {
   pdfCaptions: PdfCaption[];
   addFigure: (figure: Omit<Figure, 'id' | 'name'>) => void;
   renameFigure: (id: string, newName: string) => void;
-  updateFigureCaption: (id: string, caption: string, credit?: string) => void;
+  updateFigureCaption: (id: string, caption: string, credit?: string, captionRuns?: RunData[], creditRuns?: RunData[]) => void;
   deleteFigure: (id: string) => void;
 
   // Step 4: Review & Mapping
@@ -318,7 +328,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
         name: f.name,
         filename: f.filename,
         caption: f.caption,
+        captionRuns: f.captionRuns,
         credit: f.credit,
+        creditRuns: f.creditRuns,
       }));
 
       const res = await fetch('/api/process-ppt', {
@@ -388,9 +400,11 @@ export const useStore = create<DeckforgeState>((set, get) => ({
     }));
   },
 
-  updateFigureCaption: (id, caption, credit) => {
+  updateFigureCaption: (id, caption, credit, captionRuns, creditRuns) => {
     set((state) => ({
-      figures: state.figures.map((f) => (f.id === id ? { ...f, caption, credit } : f)),
+      figures: state.figures.map((f) =>
+        f.id === id ? { ...f, caption, credit, captionRuns, creditRuns } : f
+      ),
     }));
   },
 
@@ -424,6 +438,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
         (!isFigure && !isTable);
       if (figure.caption && captionAllowed) {
         formData.append('caption', figure.caption);
+        if (figure.captionRuns?.length) {
+          formData.append('caption_runs', JSON.stringify(figure.captionRuns));
+        }
       }
 
       const res = await fetch('/api/add-image', {
@@ -468,6 +485,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
         (!isFigureC && !isTableC);
       if (figure.caption && captionAllowedC) {
         formData.append('caption', figure.caption);
+        if (figure.captionRuns?.length) {
+          formData.append('caption_runs', JSON.stringify(figure.captionRuns));
+        }
       }
 
       const res = await fetch('/api/add-image', {
