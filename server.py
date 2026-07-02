@@ -337,6 +337,9 @@ async def process_ppt(payload: dict = None, session_id: str = Depends(get_sessio
             shutil.rmtree(extracts_dir)
         os.makedirs(extracts_dir, exist_ok=True)
 
+        include_figure_captions = (payload or {}).get("include_figure_captions", True)
+        include_table_captions = (payload or {}).get("include_table_captions", True)
+
         # Copy crops with proper names
         figures = (payload or {}).get("figures", [])
         for fig in figures:
@@ -355,7 +358,7 @@ async def process_ppt(payload: dict = None, session_id: str = Depends(get_sessio
 
         output_path = os.path.join(session_upload_dir, "styled_output.pptx")
         # Run conversion style formatting and automatic figure insertion
-        used_figs = convert(state["content_pptx"], state["template_style_json"], output_path, apply_geometry=True, figures_metadata=figures)
+        used_figs = convert(state["content_pptx"], state["template_style_json"], output_path, apply_geometry=True, figures_metadata=figures, include_figure_captions=include_figure_captions, include_table_captions=include_table_captions)
         state["styled_pptx"] = output_path
 
         # Resolve auto-inserted figures back to original filenames

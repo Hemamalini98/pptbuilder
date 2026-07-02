@@ -860,7 +860,7 @@ def fix_cover_title(slide):
 _FIG_PAT = re.compile(r'insert\s+(figure|table)\s+([\d.-]+)', re.IGNORECASE)
 
 
-def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=None):
+def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=None, include_figure_captions=True, include_table_captions=True):
     """
     Scan every slide for shapes whose text matches 'Figure X.X' (e.g. 'Insert Figure 2.1 here').
     If a matching PNG exists in pdf_extracts/, replace the shape with that image at the same
@@ -983,6 +983,15 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                     caption_text = original_text
 
             credit_text = credit_map.get(fig_key)
+
+            # Suppress caption/credit based on caller flags
+            _fig_type = fig_key.split()[0] if fig_key else ""
+            if _fig_type == "figure" and not include_figure_captions:
+                caption_text = None
+                credit_text = None
+            elif _fig_type == "table" and not include_table_captions:
+                caption_text = None
+                credit_text = None
 
             # Pre-resolve caption and credit styles to estimate required heights
             font_size_pt = 18.0
@@ -1420,7 +1429,7 @@ def fix_overflowing_textboxes(prs):
                         para.font.size = Pt(new_sz)
 
 
-def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None, figures_metadata=None):
+def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None, figures_metadata=None, include_figure_captions=True, include_table_captions=True):
     """
     Apply template styles to input.pptx and save as output.pptx.
 
@@ -1629,7 +1638,7 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
     fix_overflowing_textboxes(prs)
 
     input_dir = os.path.dirname(os.path.abspath(input_path))
-    used_figs = insert_figure_placeholders(prs, input_dir, figures_metadata, template=template)
+    used_figs = insert_figure_placeholders(prs, input_dir, figures_metadata, template=template, include_figure_captions=include_figure_captions, include_table_captions=include_table_captions)
 
     # Insert remaining loose figure extracts at the end
     skip_names = {x["dest_name"] for x in used_figs}

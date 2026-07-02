@@ -10,6 +10,10 @@ export const Step2Upload: React.FC = () => {
     selectedTemplate,
     isConverting,
     conversionProgress,
+    includeFigureCaptions,
+    includeTableCaptions,
+    setIncludeFigureCaptions,
+    setIncludeTableCaptions,
     uploadInputPptFile,
     uploadPdfFile,
     setStep
@@ -222,6 +226,60 @@ export const Step2Upload: React.FC = () => {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {!isConverting && (
+        <div className="surface-card p-4 space-y-3">
+          <h3 className="text-xs font-black uppercase tracking-wider text-[var(--color-navy)]">
+            Caption Options
+          </h3>
+          <p className="text-xs text-[var(--color-muted)]">
+            Choose whether to insert captions below figures and tables when processing the presentation.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-4">
+            <label className="flex items-center gap-3 cursor-pointer select-none group">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={includeFigureCaptions}
+                onClick={() => setIncludeFigureCaptions(!includeFigureCaptions)}
+                className={`relative w-10 h-5 rounded-full transition-colors duration-200 focus:outline-none ${
+                  includeFigureCaptions ? 'bg-[var(--color-navy)]' : 'bg-zinc-300'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${
+                    includeFigureCaptions ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+              <span className="text-sm font-medium text-[var(--color-navy)]">
+                Include Figure Captions
+              </span>
+            </label>
+
+            <label className="flex items-center gap-3 cursor-pointer select-none group">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={includeTableCaptions}
+                onClick={() => setIncludeTableCaptions(!includeTableCaptions)}
+                className={`relative w-10 h-5 rounded-full transition-colors duration-200 focus:outline-none ${
+                  includeTableCaptions ? 'bg-[var(--color-navy)]' : 'bg-zinc-300'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${
+                    includeTableCaptions ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+              <span className="text-sm font-medium text-[var(--color-navy)]">
+                Include Table Captions
+              </span>
+            </label>
           </div>
         </div>
       )}

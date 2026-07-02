@@ -115,6 +115,10 @@ interface DeckforgeState {
   sourcePdfPages: number;
   isConverting: boolean;
   conversionProgress: number;
+  includeFigureCaptions: boolean;
+  includeTableCaptions: boolean;
+  setIncludeFigureCaptions: (val: boolean) => void;
+  setIncludeTableCaptions: (val: boolean) => void;
 
   // Step 3: PDF Figure Extraction
   pdfUrl: string | null;
@@ -167,6 +171,10 @@ export const useStore = create<DeckforgeState>((set, get) => ({
   sourcePdfPages: 0,
   isConverting: false,
   conversionProgress: 0,
+  includeFigureCaptions: true,
+  includeTableCaptions: true,
+  setIncludeFigureCaptions: (val) => set({ includeFigureCaptions: val }),
+  setIncludeTableCaptions: (val) => set({ includeTableCaptions: val }),
 
   // Step 3
   pdfUrl: null,
@@ -316,7 +324,11 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       const res = await fetch('/api/process-ppt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ figures: figuresPayload }),
+        body: JSON.stringify({
+          figures: figuresPayload,
+          include_figure_captions: get().includeFigureCaptions,
+          include_table_captions: get().includeTableCaptions,
+        }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -404,7 +416,13 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       formData.append('y_pt', String(targetShape.position.y_pt));
       formData.append('w_pt', String(targetShape.size.width_pt));
       formData.append('h_pt', String(targetShape.size.height_pt));
-      if (figure.caption) {
+      const isFigure = figure.name.toLowerCase().startsWith('figure');
+      const isTable = figure.name.toLowerCase().startsWith('table');
+      const captionAllowed =
+        (isFigure && get().includeFigureCaptions) ||
+        (isTable && get().includeTableCaptions) ||
+        (!isFigure && !isTable);
+      if (figure.caption && captionAllowed) {
         formData.append('caption', figure.caption);
       }
 
@@ -442,7 +460,13 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       formData.append('y_pt', String(y_pt));
       formData.append('w_pt', String(w_pt));
       formData.append('h_pt', String(h_pt));
-      if (figure.caption) {
+      const isFigureC = figure.name.toLowerCase().startsWith('figure');
+      const isTableC = figure.name.toLowerCase().startsWith('table');
+      const captionAllowedC =
+        (isFigureC && get().includeFigureCaptions) ||
+        (isTableC && get().includeTableCaptions) ||
+        (!isFigureC && !isTableC);
+      if (figure.caption && captionAllowedC) {
         formData.append('caption', figure.caption);
       }
 
