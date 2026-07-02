@@ -919,6 +919,7 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
     credit_map = {}
     caption_runs_map = {}
     credit_runs_map = {}
+    alt_text_map = {}
     if figures_metadata:
         for fig in figures_metadata:
             name = fig.get("name")
@@ -938,6 +939,8 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                     caption_runs_map[key] = fig["captionRuns"]
                 if fig.get("creditRuns"):
                     credit_runs_map[key] = fig["creditRuns"]
+                if fig.get("alt_text"):
+                    alt_text_map[key] = fig["alt_text"]
 
     used = []
     for slide_idx, slide in enumerate(prs.slides):
@@ -1172,6 +1175,14 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                 # Center the image horizontally and vertically within the remaining placeholder box
                 pic.left = left + int((w - pic.width) / 2)
                 pic.top = top + int((max_pic_h - pic.height) / 2)
+
+            # Apply alt text (WCAG / PPTX accessibility) — only set descr; title is a separate field
+            if pic and fig_key in alt_text_map:
+                try:
+                    cNvPr = pic._element[0][0]
+                    cNvPr.set('descr', alt_text_map[fig_key])
+                except Exception:
+                    pass
 
             # Insert Caption Textbox if text exists
             if caption_text and pic:

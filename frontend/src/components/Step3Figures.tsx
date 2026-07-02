@@ -2,6 +2,54 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { type AltTextEntry } from '../store';
+
+const AltTextField: React.FC<{
+  figId: string;
+  stored: string | undefined;
+  excelEntry: AltTextEntry | undefined;
+  onUpdate: (id: string, text: string) => void;
+}> = ({ figId, stored, excelEntry, onUpdate }) => {
+  const hasExcel = !!excelEntry;
+  const [value, setValue] = useState(stored ?? '');
+
+  // Sync inward when store value changes from outside (e.g. Apply button)
+  useEffect(() => {
+    setValue(stored ?? '');
+  }, [stored]);
+
+  return (
+    <div className="space-y-0.5">
+      <div className="flex items-center justify-between">
+        <span className="font-semibold text-[#64748b] text-[7px] uppercase tracking-wider">
+          Alt Text {hasExcel && <span className="text-[#22d3ee]">✓</span>}
+        </span>
+        {hasExcel && !stored && (
+          <button
+            onClick={() => onUpdate(figId, excelEntry.alt_text_short)}
+            className="text-[7px] text-[#38bdf8] hover:text-white border-none bg-none cursor-pointer px-1"
+            title="Apply alt text from Excel"
+          >
+            Apply
+          </button>
+        )}
+      </div>
+      <textarea
+        value={value}
+        placeholder={hasExcel ? 'Click Apply or type…' : 'No alt text — upload Excel'}
+        rows={3}
+        onChange={(e) => {
+          setValue(e.target.value);
+          onUpdate(figId, e.target.value);
+        }}
+        className="w-full bg-[#0f172a] border border-[#334155] rounded px-1.5 py-1 text-[#e2e8f0] text-[8.5px] outline-none focus:border-[#38bdf8] resize-none leading-relaxed placeholder:text-[#475569]"
+      />
+      {hasExcel && excelEntry.decorative && (
+        <span className="text-[7px] text-amber-400 font-semibold">Decorative</span>
+      )}
+    </div>
+  );
+};
 
 const PdfThumbnail: React.FC<{ doc: any; pageNum: number; active: boolean; onClick: () => void }> = ({ doc, pageNum, active, onClick }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -88,15 +136,50 @@ export const Step3Figures: React.FC = () => {
     currentPdfPage,
     figures,
     pdfCaptions,
+    altTextEntries,
+    altTextLoading,
+    detectedChapter,
     addFigure,
     renameFigure,
     updateFigureCaption,
+    updateFigureAltText,
     deleteFigure,
+    uploadAltTextExcel,
     convertDeck,
     isConverting,
     conversionProgress,
     slides,
   } = useStore();
+
+  const altTextFileRef = useRef<HTMLInputElement>(null);
+
+  // Build a lookup map from figure_key → entry for fast access
+  const altTextMap = React.useMemo(() => {
+    const m: Record<string, AltTextEntry> = {};
+    altTextEntries.forEach((e) => { m[e.figure_key] = e; });
+    return m;
+  }, [altTextEntries]);
+
+  // Resolve alt text entry for a figure label.
+  // - "Figure 1.1" → chapter is already embedded as the first number; direct lookup only.
+  // - "Figure 1"   → no chapter in label; use detectedChapter from filename as fallback.
+  const resolveAltEntry = React.useCallback((label: string): AltTextEntry | undefined => {
+    const key = label.toLowerCase().trim();
+    if (altTextMap[key]) return altTextMap[key];
+
+    const dotFmt = key.match(/^(figure|table)\s+\d+\.\d+/);
+    if (dotFmt) return undefined; // chapter already in label — no further fallback
+
+    // Single number format e.g. "figure 1" — use filename-detected chapter
+    if (detectedChapter != null) {
+      const m = key.match(/^(figure|table)\s+(\d+)$/);
+      if (m) {
+        const fallbackKey = `${m[1]} ${detectedChapter}.${m[2]}`;
+        if (altTextMap[fallbackKey]) return altTextMap[fallbackKey];
+      }
+    }
+    return undefined;
+  }, [altTextMap, detectedChapter]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -111,6 +194,7 @@ export const Step3Figures: React.FC = () => {
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
   const [currentBox, setCurrentBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [showAltWarning, setShowAltWarning] = useState(false);
 
   // Extract all figures/tables referenced in the source presentation
   const mentionedRefs = React.useMemo(() => {
@@ -454,6 +538,39 @@ export const Step3Figures: React.FC = () => {
 
           <div className="w-[1px] bg-[#334155] h-5 sep"></div>
 
+          {/* Alt-Text Excel Upload */}
+          <input
+            ref={altTextFileRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              e.target.value = '';
+              const p = uploadAltTextExcel(file);
+              toast.promise(p, {
+                loading: 'Parsing alt-text Excel…',
+                success: `Alt texts loaded`,
+                error: 'Failed to parse Excel',
+              });
+            }}
+          />
+          <button
+            onClick={() => altTextFileRef.current?.click()}
+            disabled={altTextLoading}
+            title="Upload alt-text Excel"
+            className="border-none rounded-md px-3 py-1.5 text-xs font-bold bg-[#1e3a4f] hover:bg-[#0284c7] text-[#38bdf8] hover:text-white disabled:opacity-50 disabled:cursor-default transition-all cursor-pointer flex items-center gap-1.5"
+          >
+            {altTextLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : '♿'}
+            Alt Text {altTextEntries.length > 0 && detectedChapter != null && (() => {
+                const chapterCount = altTextEntries.filter(e => parseInt(e.chapter) === detectedChapter).length;
+                return <span className="text-[9px] opacity-70">({chapterCount} CH{detectedChapter})</span>;
+              })()}
+          </button>
+
+          <div className="w-[1px] bg-[#334155] h-5 sep"></div>
+
           <span className="text-[10px] text-[#64748b] flex-1 text-left font-mono coords">
             {currentBox
               ? `${Math.round(currentBox.w)} × ${Math.round(currentBox.h)} px selected`
@@ -537,15 +654,23 @@ export const Step3Figures: React.FC = () => {
 
         <div className="flex-1 overflow-y-auto p-2.5 space-y-3.5 ext-list">
           {figures.map((fig) => {
-            const figuresList = filteredCaptions.filter(c => {
+            // Captions already picked by OTHER figures — exclude from this card's dropdown
+            const usedCaptions = new Set(
+              figures.filter(f => f.id !== fig.id && f.caption).map(f => f.caption!)
+            );
+            const availableCaptions = filteredCaptions.filter(
+              c => !usedCaptions.has(c.text) || c.text === fig.caption
+            );
+
+            const figuresList = availableCaptions.filter(c => {
               const lbl = (c.label || '').toLowerCase();
               return lbl.startsWith('figure') || lbl.startsWith('fig');
             });
-            const tablesList = filteredCaptions.filter(c => {
+            const tablesList = availableCaptions.filter(c => {
               const lbl = (c.label || '').toLowerCase();
               return lbl.startsWith('table') || lbl.startsWith('tab');
             });
-            const othersList = filteredCaptions.filter(c => {
+            const othersList = availableCaptions.filter(c => {
               const lbl = (c.label || '').toLowerCase();
               return !lbl.startsWith('figure') && !lbl.startsWith('fig') && !lbl.startsWith('table') && !lbl.startsWith('tab');
             });
@@ -564,11 +689,20 @@ export const Step3Figures: React.FC = () => {
                       if (matchingCaption) {
                         renameFigure(fig.id, matchingCaption.label);
                         updateFigureCaption(fig.id, matchingCaption.text, matchingCaption.credit, matchingCaption.runs, matchingCaption.creditRuns);
+                        // Auto-sync alt text from Excel whenever caption changes
+                        const altEntry = resolveAltEntry(matchingCaption.label);
+                        if (altEntry) {
+                          updateFigureAltText(fig.id, altEntry.alt_text_short);
+                        }
                       } else {
                         updateFigureCaption(fig.id, "", "");
                       }
                     }}
-                    className="w-full bg-[#0f172a] border border-[#334155] rounded px-1.5 py-1 text-[#e2e8f0] text-[9.5px] outline-none focus:border-[#38bdf8] text-ellipsis overflow-hidden whitespace-nowrap"
+                    className={`w-full bg-[#0f172a] rounded px-1.5 py-1 text-[9.5px] outline-none text-ellipsis overflow-hidden whitespace-nowrap border ${
+                      fig.caption
+                        ? 'border-[#334155] text-[#e2e8f0] focus:border-[#38bdf8]'
+                        : 'border-amber-500/60 text-amber-400 focus:border-amber-400'
+                    }`}
                   >
                     <option value="">-- Select Caption --</option>
                     {figuresList.length > 0 && (
@@ -606,6 +740,16 @@ export const Step3Figures: React.FC = () => {
                     {fig.credit}
                   </div>
                 )}
+
+                {/* Alt Text block — figures only, not tables */}
+                {!fig.name.toLowerCase().startsWith('table') && (
+                  <AltTextField
+                    figId={fig.id}
+                    stored={fig.alt_text}
+                    excelEntry={resolveAltEntry(fig.name)}
+                    onUpdate={updateFigureAltText}
+                  />
+                )}
               </div>
               <div className="flex items-center gap-1.5 p-2 bg-[#1e293b] border-t border-[#334155] ext-card-foot">
                 <input
@@ -632,7 +776,14 @@ export const Step3Figures: React.FC = () => {
 
         <div className="p-3 border-t border-[#334155] bg-[#1e293b] flex-shrink-0">
           <button
-            onClick={() => convertDeck(4)}
+            onClick={() => {
+              const missing = figures.filter(f => !f.alt_text?.trim());
+              if (missing.length > 0) {
+                setShowAltWarning(true);
+              } else {
+                convertDeck(4);
+              }
+            }}
             disabled={isConverting}
             className={`w-full py-2.5 font-bold rounded text-xs transition-all shadow-md flex items-center justify-center gap-2 ${
               isConverting
@@ -653,6 +804,45 @@ export const Step3Figures: React.FC = () => {
       </aside>
 
       {/* Full-screen processing overlay */}
+      {/* Alt Text warning modal */}
+      {showAltWarning && (() => {
+        const missing = figures.filter(f => !f.alt_text?.trim());
+        return (
+          <div className="absolute inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center">
+            <div className="bg-[#1e293b] border border-[#334155] rounded-xl shadow-2xl w-80 p-5 space-y-4">
+              <div className="flex items-start gap-3">
+                <span className="text-amber-400 text-xl mt-0.5">⚠</span>
+                <div>
+                  <h3 className="text-sm font-bold text-[#f1f5f9]">Missing Alt Text</h3>
+                  <p className="text-[11px] text-[#94a3b8] mt-1 leading-relaxed">
+                    {missing.length} figure{missing.length > 1 ? 's are' : ' is'} missing alt text:
+                  </p>
+                  <ul className="mt-1.5 space-y-0.5 max-h-28 overflow-y-auto">
+                    {missing.map(f => (
+                      <li key={f.id} className="text-[10px] text-amber-300 font-mono">• {f.name || 'Unnamed'}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={() => setShowAltWarning(false)}
+                  className="flex-1 py-2 rounded text-xs font-bold bg-[#334155] hover:bg-[#475569] text-[#e2e8f0] cursor-pointer border-none transition-colors"
+                >
+                  Go Back
+                </button>
+                <button
+                  onClick={() => { setShowAltWarning(false); convertDeck(4); }}
+                  className="flex-1 py-2 rounded text-xs font-bold bg-[#0284c7] hover:bg-[#0369a1] text-white cursor-pointer border-none transition-colors"
+                >
+                  Proceed Anyway
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {isConverting && (
         <div className="absolute inset-0 z-50 bg-white/80 backdrop-blur-sm flex flex-col items-center justify-center gap-6">
           <Loader2 className="w-14 h-14 text-[#0284c7] animate-spin" />

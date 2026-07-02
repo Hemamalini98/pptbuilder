@@ -71,6 +71,15 @@ export interface RunData {
   italic: boolean;
 }
 
+export interface AltTextEntry {
+  figure_key: string;   // e.g. "figure 1.1"
+  element: string;      // raw element number from Excel
+  chapter: string;
+  decorative: boolean;
+  alt_text_short: string;
+  alt_text_long: string;
+}
+
 export interface Figure {
   id: string;
   name: string; // e.g. Figure2.3
@@ -81,6 +90,7 @@ export interface Figure {
   captionRuns?: RunData[]; // per-run bold/italic from PDF
   credit?: string;  // extracted figure credit
   creditRuns?: RunData[]; // per-run bold/italic from PDF
+  alt_text?: string; // accessibility alt text from Excel
   mappedTo?: {
     slideIndex: number;
     shapeIndex: number;
@@ -121,6 +131,7 @@ interface DeckforgeState {
   
   // Step 2: Source Uploads
   inputPptName: string | null;
+  detectedChapter: number | null;
   sourcePdfName: string | null;
   sourcePdfPages: number;
   isConverting: boolean;
@@ -135,10 +146,14 @@ interface DeckforgeState {
   currentPdfPage: number; // 0-indexed
   figures: Figure[];
   pdfCaptions: PdfCaption[];
+  altTextEntries: AltTextEntry[];
+  altTextLoading: boolean;
   addFigure: (figure: Omit<Figure, 'id' | 'name'>) => void;
   renameFigure: (id: string, newName: string) => void;
   updateFigureCaption: (id: string, caption: string, credit?: string, captionRuns?: RunData[], creditRuns?: RunData[]) => void;
+  updateFigureAltText: (id: string, alt_text: string) => void;
   deleteFigure: (id: string) => void;
+  uploadAltTextExcel: (file: File) => Promise<void>;
 
   // Step 4: Review & Mapping
   slides: SlideData[] | null;
@@ -177,6 +192,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
 
   // Step 2
   inputPptName: null,
+  detectedChapter: null,
   sourcePdfName: null,
   sourcePdfPages: 0,
   isConverting: false,
@@ -191,6 +207,8 @@ export const useStore = create<DeckforgeState>((set, get) => ({
   currentPdfPage: 0,
   figures: [],
   pdfCaptions: [],
+  altTextEntries: [],
+  altTextLoading: false,
 
   // Step 4
   slides: null,
@@ -280,9 +298,10 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       });
       const data = await res.json();
       if (data.ok) {
-        set({ 
+        set({
           inputPptName: file.name,
-          slides: data.slidesInfo?.slides || null
+          detectedChapter: data.chapterNumber ?? null,
+          slides: data.slidesInfo?.slides || null,
         });
       }
     } catch (err) {
@@ -331,6 +350,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
         captionRuns: f.captionRuns,
         credit: f.credit,
         creditRuns: f.creditRuns,
+        alt_text: f.alt_text,
       }));
 
       const res = await fetch('/api/process-ppt', {
@@ -412,6 +432,38 @@ export const useStore = create<DeckforgeState>((set, get) => ({
     set((state) => ({
       figures: state.figures.filter((f) => f.id !== id),
     }));
+  },
+
+  updateFigureAltText: (id, alt_text) => {
+    set((state) => ({
+      figures: state.figures.map((f) => f.id === id ? { ...f, alt_text } : f),
+    }));
+  },
+
+  uploadAltTextExcel: async (file) => {
+    set({ altTextLoading: true });
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/parse-alttext-excel', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.detail || 'Parse failed');
+      const entries: AltTextEntry[] = data.entries;
+      // Auto-assign alt text to any figure whose name already matches a key
+      const altMap: Record<string, AltTextEntry> = {};
+      entries.forEach((e) => { altMap[e.figure_key] = e; });
+      set((state) => ({
+        altTextEntries: entries,
+        figures: state.figures.map((f) => {
+          const key = f.name.toLowerCase().replace(/([a-z]+)(\d)/, '$1 $2').replace(/(\d+)\.(\d+)/, '$1.$2');
+          const norm = key.replace(/^(figure|table)\s*/, (m: string) => m.trim() + ' ');
+          const entry = altMap[norm] ?? altMap[f.name.toLowerCase()];
+          return entry ? { ...f, alt_text: entry.alt_text_short } : f;
+        }),
+      }));
+    } finally {
+      set({ altTextLoading: false });
+    }
   },
 
   placeFigureOnShape: async (slideIndex, shapeIndex, figureId) => {
@@ -550,6 +602,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       selectedTemplate: null,
       templateStyles: null,
       inputPptName: null,
+      detectedChapter: null,
       sourcePdfName: null,
       sourcePdfPages: 0,
       isConverting: false,
