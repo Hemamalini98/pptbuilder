@@ -160,7 +160,7 @@ def extract_pdf_captions(pdf_path):
     pattern = re.compile(r"^\s*(Figure|Fig\.|Table)\s+(\d+[-.\d]*)\b", re.IGNORECASE)
     credit_pattern = re.compile(
         r"^\s*(©|Copyright\b|Courtesy of\b|Source:\b|Source\b|Reproduced from\b|"
-        r"Reproduced with permission\b|Data from\b|Courtesy\b|Permission\b)",
+        r"Reproduced with permission\b|Data from\b|Courtesy\b|Permission\b|Used with permission\b)",
         re.IGNORECASE,
     )
 
@@ -360,19 +360,14 @@ async def upload_ppt(file: UploadFile = File(...), session_id: str = Depends(get
         path = os.path.join(session_upload_dir, "uploaded_content.pptx")
         with open(path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-
+        
         state = get_session_state(session_id)
         state["content_pptx"] = path
-
-        # Extract chapter number from filename, e.g. "9781284308495_SLID_CH02.pptx" → 2
-        ch_match = re.search(r'_(?:chapter|ch)(\d{1,3})', file.filename or '', re.IGNORECASE)
-        chapter_number = int(ch_match.group(1)) if ch_match else None
-        state["chapter_number"] = chapter_number
-
+        
         from main import extract_template
         slides_info = extract_template(path)
-
-        return {"ok": True, "filename": file.filename, "slidesInfo": slides_info, "chapterNumber": chapter_number}
+        
+        return {"ok": True, "filename": file.filename, "slidesInfo": slides_info}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -763,72 +758,6 @@ async def get_figure_diagnostics(session_id: str = Depends(get_session_id)):
         return {"ok": True, "missing": missing, "unplaced": unplaced}
     except Exception as e:
         return {"ok": False, "detail": str(e), "missing": [], "unplaced": []}
-
-@app.post("/api/parse-alttext-excel")
-async def parse_alttext_excel(file: UploadFile = File(...), session_id: str = Depends(get_session_id)):
-    """Parse an alt-text Excel file and return a map of figure_key → alt text entries."""
-    try:
-        import openpyxl, io, re as _re
-        contents = await file.read()
-        wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
-
-        # Prefer 'For Import' sheet, fall back to first sheet
-        ws = wb['For Import'] if 'For Import' in wb.sheetnames else wb.active
-
-        # Column indices (0-based): Book code(0) ChPrefix(1) ChNum(2) ElemNum(3)
-        # Usage(4) Decorative(5) AltShort(6) AltLong(7) FigNaming(11)
-        entries = []
-        seen_keys = {}  # key → index in entries (for multi-part figures)
-
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            chapter = row[2] if len(row) > 2 else None
-            element = row[3] if len(row) > 3 else None
-            usage   = str(row[4]).strip().upper() if len(row) > 4 and row[4] else ""
-            decorative = str(row[5]).strip().upper() if len(row) > 5 and row[5] else "NO"
-            alt_short  = str(row[6]).strip() if len(row) > 6 and row[6] else ""
-            alt_long   = str(row[7]).strip() if len(row) > 7 and row[7] else ""
-
-            if not element or not alt_short:
-                continue
-
-            # Build normalised figure key from element + chapter
-            # Element format: F01, F01_1, T02, UN03 …
-            m = _re.match(r'([FT])(\d+)(?:_\d+)?$', str(element).strip(), _re.I)
-            if m and chapter is not None:
-                prefix = 'figure' if m.group(1).upper() == 'F' else 'table'
-                fig_num = int(m.group(2))
-                try:
-                    ch_num = int(chapter)
-                    figure_key = f"{prefix} {ch_num}.{fig_num}"
-                except (ValueError, TypeError):
-                    figure_key = f"{prefix} {chapter}.{fig_num}"
-            else:
-                figure_key = f"{str(element).strip().lower()}"
-
-            if figure_key in seen_keys:
-                # Multi-part figure: append long text to existing entry
-                idx = seen_keys[figure_key]
-                if alt_long and not entries[idx]["alt_text_long"]:
-                    entries[idx]["alt_text_long"] = alt_long
-            else:
-                seen_keys[figure_key] = len(entries)
-                entries.append({
-                    "figure_key": figure_key,
-                    "element":    str(element).strip(),
-                    "chapter":    str(chapter).strip() if chapter else "",
-                    "decorative": decorative == "YES",
-                    "alt_text_short": alt_short,
-                    "alt_text_long":  alt_long,
-                })
-
-        # Store in session state so convert can use it too
-        state = get_session_state(session_id)
-        state["alt_text_map"] = {e["figure_key"]: e for e in entries}
-
-        return {"ok": True, "entries": entries, "count": len(entries)}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse Excel: {e}")
-
 
 @app.get("/api/accessibility-report")
 async def get_accessibility_report(session_id: str = Depends(get_session_id)):

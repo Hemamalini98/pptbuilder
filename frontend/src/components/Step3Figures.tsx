@@ -51,6 +51,29 @@ const AltTextField: React.FC<{
   );
 };
 
+const CreditField: React.FC<{
+  figId: string;
+  stored: string | undefined;
+  onUpdate: (id: string, credit: string) => void;
+}> = ({ figId, stored, onUpdate }) => {
+  const [value, setValue] = useState(stored ?? '');
+
+  useEffect(() => { setValue(stored ?? ''); }, [stored]);
+
+  return (
+    <div className="space-y-0.5">
+      <span className="font-semibold text-[#64748b] text-[7px] uppercase tracking-wider block">Credit</span>
+      <input
+        type="text"
+        value={value}
+        placeholder="Add credit line…"
+        onChange={(e) => { setValue(e.target.value); onUpdate(figId, e.target.value); }}
+        className="w-full bg-[#0f172a] border border-[#334155] rounded px-1.5 py-1 text-[#e2e8f0] text-[8.5px] outline-none focus:border-[#38bdf8] placeholder:text-[#475569]"
+      />
+    </div>
+  );
+};
+
 const PdfThumbnail: React.FC<{ doc: any; pageNum: number; active: boolean; onClick: () => void }> = ({ doc, pageNum, active, onClick }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -142,6 +165,7 @@ export const Step3Figures: React.FC = () => {
     addFigure,
     renameFigure,
     updateFigureCaption,
+    updateFigureCredit,
     updateFigureAltText,
     deleteFigure,
     uploadAltTextExcel,
@@ -734,12 +758,11 @@ export const Step3Figures: React.FC = () => {
                     )}
                   </select>
 
-                {fig.credit && (
-                  <div className="text-[8.5px] text-slate-400 bg-slate-900/50 p-1.5 rounded border border-slate-800/80 leading-normal">
-                    <span className="font-semibold text-slate-500 block text-[7px] uppercase tracking-wider mb-0.5">Credit</span>
-                    {fig.credit}
-                  </div>
-                )}
+                <CreditField
+                  figId={fig.id}
+                  stored={fig.credit}
+                  onUpdate={updateFigureCredit}
+                />
 
                 {/* Alt Text block — figures only, not tables */}
                 {!fig.name.toLowerCase().startsWith('table') && (

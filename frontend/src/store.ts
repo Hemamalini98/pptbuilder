@@ -151,6 +151,7 @@ interface DeckforgeState {
   addFigure: (figure: Omit<Figure, 'id' | 'name'>) => void;
   renameFigure: (id: string, newName: string) => void;
   updateFigureCaption: (id: string, caption: string, credit?: string, captionRuns?: RunData[], creditRuns?: RunData[]) => void;
+  updateFigureCredit: (id: string, credit: string) => void;
   updateFigureAltText: (id: string, alt_text: string) => void;
   deleteFigure: (id: string) => void;
   uploadAltTextExcel: (file: File) => Promise<void>;
@@ -417,6 +418,14 @@ export const useStore = create<DeckforgeState>((set, get) => ({
   renameFigure: (id, newName) => {
     set((state) => ({
       figures: state.figures.map((f) => (f.id === id ? { ...f, name: newName } : f)),
+    }));
+  },
+
+  updateFigureCredit: (id, credit) => {
+    set((state) => ({
+      figures: state.figures.map((f) =>
+        f.id === id ? { ...f, credit } : f
+      ),
     }));
   },
 
