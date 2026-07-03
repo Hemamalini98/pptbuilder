@@ -187,9 +187,11 @@ def apply_para_style(para, style, color_scheme):
     if not has_bu_none:
         if "marginLeft_pt" in style or "indent_pt" in style:
             pPr = _get_or_create_pPr(p_el)
-            if "marginLeft_pt" in style:
+            # Preserve input's explicit marL/indent — only apply template values when absent.
+            # This keeps hanging-indent geometry from the source doc intact.
+            if "marginLeft_pt" in style and pPr.get("marL") is None:
                 pPr.set("marL", str(int(style["marginLeft_pt"] * PT_TO_EMU)))
-            if "indent_pt" in style:
+            if "indent_pt" in style and pPr.get("indent") is None:
                 pPr.set("indent", str(int(style["indent_pt"] * PT_TO_EMU)))
 
         # Stamp template bullet char/font so the input master's circle bullet
@@ -1480,15 +1482,14 @@ def fix_overflowing_textboxes(prs):
                 para_details.append((para, pt_sz, para_h))
             
             if total_est_h > avail_h and para_details:
-                # Calculate scale factor
+                # Calculate scale factor and snap to nearest multiple of 2 (standard PPT steps)
                 scale = avail_h / total_est_h
-                # Let's scale down font sizes
                 for para, orig_sz, _ in para_details:
-                    new_sz = max(10.0, orig_sz * scale)
-                    # Apply new size to all runs in paragraph
+                    scaled = orig_sz * scale
+                    # Floor to nearest even integer (e.g. 17.3 → 16, 22.9 → 22)
+                    new_sz = max(10.0, math.floor(scaled / 2) * 2)
                     for r in para.runs:
                         r.font.size = Pt(new_sz)
-                    # If paragraph has no runs but has text, set font size on paragraph
                     if not para.runs:
                         para.font.size = Pt(new_sz)
 
@@ -1591,6 +1592,8 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             ph_idx  = shape.placeholder_format.idx
             ph_type = str(shape.placeholder_format.type)
             is_title = any(t in ph_type for t in TITLE_PH_TYPES)
+            # Subtitle also must not inherit bullet styling from layout lstStyle
+            is_title_or_subtitle = is_title or "SUBTITLE" in ph_type
 
             # If layout is comparison (slideLayout5) and the slide only has a single body content placeholder
             # at idx 1 (idx 2 is missing), remap idx 1 to 2 so it styles as body content, not column title.
@@ -1661,6 +1664,13 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
 
                 # Build cascaded style: master → layout → slide-specific
                 final_style = merge(master_style, layout_style, slide_style)
+
+                # Title/subtitle placeholders never have bullets — strip any
+                # bullet keys that may have leaked in from the layout lstStyle.
+                if is_title_or_subtitle:
+                    for _bk in ('bulletChar', 'bulletFont', 'bulletColor',
+                                'marginLeft_pt', 'indent_pt'):
+                        final_style.pop(_bk, None)
 
                 apply_para_style(para, final_style, color_scheme)
 
