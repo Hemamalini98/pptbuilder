@@ -18,6 +18,8 @@ def get_contrast_ratio(rgb1, rgb2):
 
 def check_ppt_accessibility(file_path):
     prs = Presentation(file_path)
+    slide_w_pt = prs.slide_width / 12700
+    slide_h_pt = prs.slide_height / 12700
     issues = []
 
     for slide_index, slide in enumerate(prs.slides, start=1):
@@ -116,66 +118,113 @@ def check_ppt_accessibility(file_path):
                 tf = shape.text_frame
                 width_pt = shape.width / 12700
                 height_pt = shape.height / 12700
-                
-                # Default margins in EMUs
-                lIns = 10.0
-                rIns = 10.0
-                tIns = 5.0
-                bIns = 5.0
+
+                # PPTX default internal margins (in EMU → pt)
+                lIns = 91440 / 12700   # 7.2pt
+                rIns = 91440 / 12700
+                tIns = 45720 / 12700   # 3.6pt
+                bIns = 45720 / 12700
                 bodyPr = tf._txBody.find("{http://schemas.openxmlformats.org/drawingml/2006/main}bodyPr")
+                sp_autofit = False
+                norm_autofit = False
                 if bodyPr is not None:
                     if bodyPr.get("lIns") is not None: lIns = int(bodyPr.get("lIns")) / 12700
                     if bodyPr.get("rIns") is not None: rIns = int(bodyPr.get("rIns")) / 12700
                     if bodyPr.get("tIns") is not None: tIns = int(bodyPr.get("tIns")) / 12700
                     if bodyPr.get("bIns") is not None: bIns = int(bodyPr.get("bIns")) / 12700
-                
-                avail_w = max(50.0, width_pt - lIns - rIns)
-                avail_h = max(20.0, height_pt - tIns - bIns)
-                
-                total_est_h = 0.0
-                for para in tf.paragraphs:
-                    pt_sz = 18.0 # default size
-                    if para.runs:
-                        for r in para.runs:
-                            if r.font.size is not None:
-                                pt_sz = r.font.size.pt
-                                break
-                    elif para.font.size is not None:
-                        pt_sz = para.font.size.pt
-                    
-                    text = para.text
-                    if not text.strip():
-                        continue
-                    
-                    # Estimate lines
-                    char_w = pt_sz * 0.38
-                    est_text_w = len(text) * char_w
-                    lines = max(1.0, math.ceil(est_text_w / avail_w))
-                    
-                    sb = 0.0
-                    sa = 6.0
-                    if para.space_before is not None:
-                        sb = para.space_before.pt
-                    if para.space_after is not None:
-                        sa = para.space_after.pt
-                    
-                    ls = 1.15
-                    if para.line_spacing is not None:
-                        if isinstance(para.line_spacing, float):
-                            ls = para.line_spacing
+                    sp_autofit   = bodyPr.find("{http://schemas.openxmlformats.org/drawingml/2006/main}spAutoFit") is not None
+                    norm_autofit = bodyPr.find("{http://schemas.openxmlformats.org/drawingml/2006/main}normAutofit") is not None
+
+                # spAutoFit: shape expands to fit — no overflow possible, skip entirely.
+                # normAutofit: text shrinks to fit — flag separately as a readability issue.
+                if sp_autofit:
+                    pass
+                else:
+                    base_avail_w = max(10.0, width_pt - lIns - rIns)
+                    avail_h = max(1.0, height_pt - tIns - bIns)
+
+                    total_est_h = 0.0
+                    for para in tf.paragraphs:
+                        pt_sz = 18.0
+                        if para.runs:
+                            for r in para.runs:
+                                if r.font.size is not None:
+                                    pt_sz = r.font.size.pt
+                                    break
+                        elif para.font.size is not None:
+                            pt_sz = para.font.size.pt
+
+                        text = para.text
+                        if not text.strip():
+                            continue
+
+                        # Sub-bullet indentation reduces available width per paragraph
+                        pPr = para._p.find("{http://schemas.openxmlformats.org/drawingml/2006/main}pPr")
+                        mar_l_pt = 0.0
+                        if pPr is not None and pPr.get("marL"):
+                            mar_l_pt = int(pPr.get("marL")) / 12700
+                        para_avail_w = max(10.0, base_avail_w - mar_l_pt)
+
+                        char_w = pt_sz * 0.38
+                        lines = max(1.0, math.ceil(len(text) * char_w / para_avail_w))
+
+                        sb = para.space_before.pt if para.space_before else 0.0
+                        sa = para.space_after.pt if para.space_after else 6.0
+                        ls = 1.15
+                        if para.line_spacing is not None:
+                            ls = para.line_spacing if isinstance(para.line_spacing, float) else para.line_spacing.pt / pt_sz
+
+                        total_est_h += lines * (pt_sz * ls) + sb + sa
+
+                    # normAutofit: any overflow causes shrinking — use 0pt grace.
+                    # noAutofit: use 5pt grace to absorb estimation error.
+                    threshold = 0.0 if norm_autofit else 5.0
+                    if total_est_h > avail_h + threshold:
+                        if norm_autofit:
+                            issues.append({
+                                "slide": slide_index,
+                                "category": "Text Shrinks to Fit",
+                                "severity": "Warning",
+                                "detail": f"Text in '{shape.name}' is auto-shrunk to fit (requires ~{total_est_h:.1f}pt, shape height {height_pt:.1f}pt). Font may become unreadably small."
+                            })
                         else:
-                            ls = para.line_spacing.pt / pt_sz
-                    
-                    total_est_h += lines * (pt_sz * ls) + sb + sa
-                
-                # If overflow exceeds by more than 5pt
-                if total_est_h > avail_h + 5.0:
-                    issues.append({
-                        "slide": slide_index,
-                        "category": "Text Overflow",
-                        "severity": "Warning",
-                        "detail": f"Text in '{shape.name}' potentially overflows shape bounds (requires ~{total_est_h:.1f}pt, shape height {height_pt:.1f}pt)."
-                    })
+                            issues.append({
+                                "slide": slide_index,
+                                "category": "Text Overflow",
+                                "severity": "Warning",
+                                "detail": f"Text in '{shape.name}' potentially overflows shape bounds (requires ~{total_est_h:.1f}pt, shape height {height_pt:.1f}pt)."
+                            })
+
+        # Check shapes that extend beyond slide boundaries (content gets clipped).
+        # Skip spAutoFit shapes — template decorative elements commonly use this and bleed off-edge intentionally.
+        for shape in slide.shapes:
+            if not shape.width or not shape.height:
+                continue
+            has_content = (shape.has_text_frame and shape.text_frame.text.strip()) or shape.shape_type == 13
+            if not has_content:
+                continue
+            if shape.has_text_frame:
+                bodyPr = shape.text_frame._txBody.find("{http://schemas.openxmlformats.org/drawingml/2006/main}bodyPr")
+                if bodyPr is not None and bodyPr.find("{http://schemas.openxmlformats.org/drawingml/2006/main}spAutoFit") is not None:
+                    continue
+            left_pt   = shape.left / 12700
+            top_pt    = shape.top / 12700
+            right_pt  = left_pt + shape.width / 12700
+            bottom_pt = top_pt + shape.height / 12700
+            if right_pt > slide_w_pt + 1:
+                issues.append({
+                    "slide": slide_index,
+                    "category": "Shape Off Slide",
+                    "severity": "Warning",
+                    "detail": f"Shape '{shape.name}' extends {right_pt - slide_w_pt:.1f}pt beyond the right edge of the slide — content will be clipped."
+                })
+            if bottom_pt > slide_h_pt + 1:
+                issues.append({
+                    "slide": slide_index,
+                    "category": "Shape Off Slide",
+                    "severity": "Warning",
+                    "detail": f"Shape '{shape.name}' extends {bottom_pt - slide_h_pt:.1f}pt below the bottom edge of the slide — content will be clipped."
+                })
 
         # Check overlaps between text and image shapes on this slide
         spatial_shapes = []
