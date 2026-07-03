@@ -1178,11 +1178,16 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                 pic.left = left + int((w - pic.width) / 2)
                 pic.top = top + int((max_pic_h - pic.height) / 2)
 
-            # Apply alt text (WCAG / PPTX accessibility) — only set descr; title is a separate field
-            if pic and fig_key in alt_text_map:
+            # Apply alt text (WCAG / PPTX accessibility) — only set descr; title is a separate field.
+            # python-pptx auto-sets descr to the image filename on add_picture(); always overwrite it
+            # so images without meaningful alt text don't silently inherit the filename.
+            if pic:
                 try:
                     cNvPr = pic._element[0][0]
-                    cNvPr.set('descr', alt_text_map[fig_key])
+                    if fig_key in alt_text_map:
+                        cNvPr.set('descr', alt_text_map[fig_key])
+                    else:
+                        cNvPr.attrib.pop('descr', None)
                 except Exception:
                     pass
 

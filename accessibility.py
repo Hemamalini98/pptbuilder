@@ -53,8 +53,11 @@ def check_ppt_accessibility(file_path):
 
             # Check images alt text
             if shape.shape_type == 13:  # Picture
-                alt_text = shape.name
-                if not alt_text or alt_text.startswith("Picture"):
+                try:
+                    descr = (shape._element.nvPicPr.cNvPr.get('descr') or '').strip()
+                except Exception:
+                    descr = ''
+                if not descr:
                     issues.append({"slide": slide_index, "category": "Missing Alt Text", "severity": "Error", "detail": "Image is missing meaningful alt text."})
 
             # Check tables
@@ -191,6 +194,7 @@ def check_ppt_accessibility(file_path):
                 t_pt = shape.top / 12700
                 spatial_shapes.append({
                     "name": shape.name,
+                    "is_pic": is_pic,
                     "box": (l_pt, t_pt, l_pt + w_pt, t_pt + h_pt)
                 })
 
@@ -198,14 +202,18 @@ def check_ppt_accessibility(file_path):
             for idx2 in range(idx1 + 1, len(spatial_shapes)):
                 s1 = spatial_shapes[idx1]
                 s2 = spatial_shapes[idx2]
+                # Only flag when a picture overlaps a text shape — decorative
+                # shape-on-shape overlaps (two rectangles, two text boxes) are intentional layout.
+                if not (s1["is_pic"] ^ s2["is_pic"]):
+                    continue
                 box1 = s1["box"]
                 box2 = s2["box"]
-                
+
                 int_l = max(box1[0], box2[0])
                 int_t = max(box1[1], box2[1])
                 int_r = min(box1[2], box2[2])
                 int_b = min(box1[3], box2[3])
-                
+
                 if int_r > int_l and int_b > int_t:
                     overlap_w = int_r - int_l
                     overlap_h = int_b - int_t
