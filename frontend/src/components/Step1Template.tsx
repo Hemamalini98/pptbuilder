@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
-import { Upload, ChevronDown, Check, Layout, FileText, X } from 'lucide-react';
+import { Upload, ChevronDown, Check, Layout, FileText, X, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 
 export const Step1Template: React.FC = () => {
@@ -71,7 +71,14 @@ export const Step1Template: React.FC = () => {
   const handleUpload = async (file: File) => {
     try {
       await uploadTemplateFile(file);
-      toast.success("Template parsed and loaded successfully!");
+      const warnings = useStore.getState().templateStyles?._meta?.warnings;
+      if (warnings && warnings.length > 0) {
+        toast.warning(
+          `Template loaded with ${warnings.length} issue${warnings.length > 1 ? 's' : ''} — see details below.`
+        );
+      } else {
+        toast.success("Template parsed and loaded successfully!");
+      }
     } catch (err) {
       toast.error("Failed to parse the template. Make sure it's a valid presentation file.");
     }
@@ -251,12 +258,30 @@ export const Step1Template: React.FC = () => {
           )}
 
           {selectedTemplate && (
-            <div className="flex-1 border border-dashed border-zinc-200 rounded-[var(--radius-custom)] bg-zinc-50/50 p-6 flex flex-col items-center justify-center text-center space-y-3">
+            <div className="flex-1 border border-dashed border-zinc-200 rounded-[var(--radius-custom)] bg-zinc-50/50 p-6 flex flex-col items-center justify-center text-center space-y-3 overflow-y-auto">
               <Check className="w-8 h-8 text-emerald-500" />
               <p className="text-xs font-bold text-[var(--color-navy)] uppercase tracking-wider">Template Loaded</p>
               <p className="text-[11px] text-[var(--color-muted)] max-w-[240px]">
                 You have successfully loaded the layout styles. Review the details in the Layout Explorer on the right, or click the button below to proceed to source upload.
               </p>
+
+              {templateStyles?._meta?.warnings && templateStyles._meta.warnings.length > 0 && (
+                <div className="w-full max-w-[320px] text-left bg-amber-50 border border-amber-200 rounded-[var(--radius-custom)] p-3 space-y-1.5">
+                  <div className="flex items-center space-x-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                    <span className="text-[10px] font-black uppercase tracking-wider text-amber-700">
+                      Template Issues Detected
+                    </span>
+                  </div>
+                  <ul className="space-y-1">
+                    {templateStyles._meta.warnings.map((w, i) => (
+                      <li key={i} className="text-[10px] text-amber-800 leading-snug">
+                        {w}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </div>

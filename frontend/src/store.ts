@@ -63,6 +63,10 @@ export interface StylesData {
   slideLayouts: any[];
   slides: SlideData[];
   theme?: any;
+  _meta?: {
+    warnings?: string[];
+    [key: string]: unknown;
+  };
 }
 
 export interface RunData {

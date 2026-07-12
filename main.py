@@ -8,6 +8,16 @@ import json
 PPTX_PATH = "9781284309591_PPTx_template.pptx"
 OUTPUT_PATH = "template_styles.json"
 
+# python-pptx's sentinel for a <p:ph> element with no idx attribute
+# (0xFFFFFFFF, i.e. -1 read as unsigned 32-bit).
+INVALID_PH_IDX = 4294967295
+
+# Collected during a single extract_template() call and surfaced to the
+# caller (server.py -> frontend) as style["_meta"]["warnings"], so template
+# defects like invalid placeholder idx values are visible in the UI instead
+# of only appearing in server console output.
+_extraction_warnings = []
+
 NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
@@ -228,7 +238,7 @@ def extract_text_body(tf):
 
 # ── SHAPE ────────────────────────────────────────────────────────────────────
 
-def extract_shape(shape):
+def extract_shape(shape, location=None):
     data = {
         "shapeName": shape.name,
         "shapeType": str(shape.shape_type),
@@ -252,9 +262,33 @@ def extract_shape(shape):
     # Placeholder info
     if shape.is_placeholder:
         ph = shape.placeholder_format
+        ph_type = str(ph.type).split(".")[-1]
+        idx = ph.idx
+        if idx == INVALID_PH_IDX:
+            # <p:ph> in the source template is missing its idx attribute —
+            # python-pptx surfaces this as the raw unsigned-int sentinel
+            # (0xFFFFFFFF) rather than raising. Infer the intended idx from
+            # the placeholder's type so downstream geometry/style matching
+            # (which keys off idx) still works, and flag the defect so it
+            # can be fixed at the source.
+            inferred_idx = 0 if "TITLE" in ph_type else (
+                1 if any(k in ph_type for k in ("BODY", "OBJECT", "TEXT")) else None
+            )
+            role = "Title" if "TITLE" in ph_type else (
+                "Content" if any(k in ph_type for k in ("BODY", "OBJECT", "TEXT")) else "A"
+            )
+            where = f" on {location}" if location else ""
+            msg = (f"{role} placeholder{where} isn't set up correctly in this template "
+                   f"(it's missing internal setup info PowerPoint needs). We automatically "
+                   f"corrected it so your presentation still converts properly, but for a "
+                   f"fully clean template, re-create this box in PowerPoint "
+                   f"(View → Slide Master).")
+            print(f"  Warning: {msg}")
+            _extraction_warnings.append(msg)
+            idx = inferred_idx
         data["placeholder"] = {
-            "type": str(ph.type).split(".")[-1],
-            "idx": ph.idx,
+            "type": ph_type,
+            "idx": idx,
         }
 
     # Fill
@@ -425,8 +459,9 @@ LAYOUT_TYPE_NAMES = {
 
 
 def extract_layout(layout, idx):
-    placeholders = [extract_shape(s) for s in layout.placeholders]
-    decorative = [extract_shape(s) for s in layout.shapes if not s.is_placeholder]
+    layout_label = f"the '{LAYOUT_TYPE_NAMES.get(idx, f'layout_{idx}')}' layout"
+    placeholders = [extract_shape(s, location=layout_label) for s in layout.placeholders]
+    decorative = [extract_shape(s, location=layout_label) for s in layout.shapes if not s.is_placeholder]
     bg = {}
     bg_el = layout.element.find(".//p:bg", NS)
     if bg_el is not None:
@@ -473,7 +508,8 @@ def extract_slide(slide, idx):
             else:
                 all_slide_shapes.append(sh)
     recurse(slide.shapes)
-    shapes.extend([extract_shape(s) for s in all_slide_shapes])
+    slide_label = f"template slide {idx + 1}"
+    shapes.extend([extract_shape(s, location=slide_label) for s in all_slide_shapes])
 
     # Extract background color
     bg_color = None
@@ -512,6 +548,7 @@ def extract_slide(slide, idx):
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 
 def extract_template(pptx_path):
+    _extraction_warnings.clear()
     prs = Presentation(pptx_path)
     master = prs.slide_master
 
@@ -542,6 +579,9 @@ def extract_template(pptx_path):
         "slideLayouts": [extract_layout(lay, i) for i, lay in enumerate(master.slide_layouts)],
         "slides": [extract_slide(sl, i) for i, sl in enumerate(prs.slides)],
     }
+
+    if _extraction_warnings:
+        style["_meta"]["warnings"] = list(_extraction_warnings)
 
     return style
 

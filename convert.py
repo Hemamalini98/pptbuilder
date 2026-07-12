@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import os
+import io
 
 INPUT_PATH = "input.pptx"
 TEMPLATE_STYLE_PATH = "template_styles.json"
@@ -17,6 +18,7 @@ COVER_IMAGE_PATH = "Picture1.png"
 PT_TO_EMU = 12700
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 ALIGN_MAP = {
     "l":    PP_ALIGN.LEFT,
@@ -389,6 +391,24 @@ def strip_copyright_from_masters(prs):
                 _remove_copyright_from_spTree(layout_spTree)
 
 
+def _relink_images(sp, source_shape, target_slide):
+    """Re-embed any images referenced by a deep-copied shape into the target
+    slide's package. copy.deepcopy() duplicates the r:embed/r:link XML
+    attributes verbatim, but those rIds only resolve within the *source*
+    part's relationships — the target slide has no such relationship, so
+    PowerPoint shows a broken-image icon unless the image is re-embedded and
+    the rId rewritten to point at the new relationship."""
+    source_part = source_shape.part
+    for attr in (f"{{{R_NS}}}embed", f"{{{R_NS}}}link"):
+        for blip in sp.iter(f"{{{A_NS}}}blip"):
+            old_rid = blip.get(attr)
+            if not old_rid:
+                continue
+            image_part = source_part.related_part(old_rid)
+            _, new_rid = target_slide.part.get_or_add_image_part(io.BytesIO(image_part.blob))
+            blip.set(attr, new_rid)
+
+
 def add_decorative_shapes(slide, layout_name, template_json, color_scheme, template_prs=None):
     """Insert non-placeholder decorative shapes (master + layout) behind slide content."""
     cSld   = slide._element.find(f"{{{P_NS}}}cSld")
@@ -401,12 +421,12 @@ def add_decorative_shapes(slide, layout_name, template_json, color_scheme, templ
         master = template_prs.slide_master
         try:
             layout_idx = int(layout_name.replace("slideLayout", "")) - 1
-            layout_deco = [s._element for s in master.slide_layouts[layout_idx].shapes
+            layout_deco = [s for s in master.slide_layouts[layout_idx].shapes
                            if not s.is_placeholder]
         except (ValueError, IndexError):
             layout_deco = []
 
-        master_deco = [s._element for s in master.shapes if not s.is_placeholder]
+        master_deco = [s for s in master.shapes if not s.is_placeholder]
 
         # Remove any existing non-placeholder shape that contains © (copyright).
         _remove_copyright_from_spTree(spTree)
@@ -424,8 +444,9 @@ def add_decorative_shapes(slide, layout_name, template_json, color_scheme, templ
 
         dk1 = color_scheme.get("dk1", "")
 
-        for sh_el in master_deco + layout_deco:
-            sp = copy.deepcopy(sh_el)
+        for sh in master_deco + layout_deco:
+            sp = copy.deepcopy(sh._element)
+            _relink_images(sp, sh, slide)
             cNvPr = sp.find(f".//{{{P_NS}}}cNvPr")
             if cNvPr is not None:
                 cNvPr.set("id", str(next_id))
