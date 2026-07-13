@@ -1642,11 +1642,29 @@ def apply_template_master(output_path, template_path):
                   "skipping slide master replacement.")
             return
 
-        fallback_name = "Title and Content" if "Title and Content" in matched_names else matched_names[0]
-        fallback_basename = o_layouts[fallback_name].rsplit("/", 1)[-1]
-
         other_layout_names = [p for name, p in o_layouts.items() if name not in matched_names]
         removed_basenames = {n.rsplit("/", 1)[-1] for n in other_layout_names}
+
+        # Renumber the *kept* layout files to be contiguous (slideLayout1..N).
+        # Dropping unmatched layouts leaves gaps in the numbering (e.g.
+        # 1,2,4,5,6,7,8 with no 3) — PowerPoint's own validator flags that and
+        # silently "repairs" the file to close the gap, which is the exact
+        # corruption this avoids by renumbering up front instead.
+        ordered_matched = sorted(
+            matched_names,
+            key=lambda name: int(re.search(r'(\d+)', o_layouts[name].rsplit("/", 1)[-1]).group(1))
+        )
+        rename_map = {}  # old output layout basename -> new (contiguous) basename
+        o_layouts_new = {}
+        for i, name in enumerate(ordered_matched, start=1):
+            old_basename = o_layouts[name].rsplit("/", 1)[-1]
+            new_basename = f"slideLayout{i}.xml"
+            rename_map[old_basename] = new_basename
+            o_layouts_new[name] = f"ppt/slideLayouts/{new_basename}"
+        o_layouts = o_layouts_new
+
+        fallback_name = "Title and Content" if "Title and Content" in matched_names else matched_names[0]
+        fallback_basename = o_layouts[fallback_name].rsplit("/", 1)[-1]
 
         # basename map: template layout file -> output layout file, for matched layouts only
         basename_map = {t_layouts[name].rsplit("/", 1)[-1]: o_layouts[name].rsplit("/", 1)[-1]
@@ -1774,6 +1792,16 @@ def apply_template_master(output_path, template_path):
             removed_files.add(n)
             removed_files.add(_rels_part(n))
 
+        # Kept layouts that got renumbered (old basename != new basename) free
+        # up their old filename too, unless another kept layout already
+        # claimed it as its own new number.
+        new_basenames_in_use = set(rename_map.values())
+        for old_basename, new_basename in rename_map.items():
+            if old_basename != new_basename and old_basename not in new_basenames_in_use:
+                old_path = f"ppt/slideLayouts/{old_basename}"
+                removed_files.add(old_path)
+                removed_files.add(_rels_part(old_path))
+
         slide_rels_names = [n for n in ozf.namelist()
                              if n.startswith("ppt/slides/_rels/") and n.endswith(".xml.rels")]
         for rels_name in slide_rels_names:
@@ -1785,8 +1813,36 @@ def apply_template_master(output_path, template_path):
                     if basename in removed_basenames:
                         rel.set("Target", "../slideLayouts/" + fallback_basename)
                         changed = True
+                    elif basename in rename_map and rename_map[basename] != basename:
+                        rel.set("Target", "../slideLayouts/" + rename_map[basename])
+                        changed = True
             if changed:
                 new_files[rels_name] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+        # Clean up orphaned/unreferenced media (e.g. an image whose shape was
+        # dropped or replaced elsewhere in the deck). PowerPoint's own repair
+        # silently deletes these itself — removing them proactively avoids
+        # triggering that "needs repair" prompt in the first place.
+        def _read_part(path):
+            return new_files[path] if path in new_files else ozf.read(path)
+
+        all_final_parts = (set(ozf.namelist()) - removed_files) | set(new_files.keys())
+        referenced_media = set()
+        for n in all_final_parts:
+            if n.endswith(".rels"):
+                base_dir = n.rsplit("/_rels/", 1)[0]
+                root = etree.fromstring(_read_part(n))
+                for rel in root:
+                    if rel.get("Type", "").endswith("/image"):
+                        resolved = os.path.normpath(
+                            os.path.join(base_dir, rel.get("Target", ""))
+                        ).replace(os.sep, "/")
+                        referenced_media.add(resolved)
+
+        orphaned_media = {n for n in all_final_parts if n.startswith("ppt/media/")} - referenced_media
+        for n in orphaned_media:
+            removed_files.add(n)
+            new_files.pop(n, None)
 
         ct_root = etree.fromstring(ozf.read("[Content_Types].xml"))
         for override in list(ct_root):
@@ -1796,6 +1852,20 @@ def apply_template_master(output_path, template_path):
             override = etree.SubElement(ct_root, f"{{{CT_NS}}}Override")
             override.set("PartName", "/" + new_path)
             override.set("ContentType", "application/vnd.openxmlformats-officedocument.themeOverride+xml")
+
+        # Renumbering layouts changes their PartName, so their original
+        # Content-Types Override was just stripped above (its old PartName is
+        # in removed_files) — re-declare one for every kept layout's final
+        # (possibly renumbered) path, or PowerPoint/python-pptx can't tell
+        # these parts are slide layouts at all.
+        existing_override_parts = {o.get("PartName") for o in ct_root.findall(f"{{{CT_NS}}}Override")}
+        for name in matched_names:
+            part_name = "/" + o_layouts[name]
+            if part_name not in existing_override_parts:
+                override = etree.SubElement(ct_root, f"{{{CT_NS}}}Override")
+                override.set("PartName", part_name)
+                override.set("ContentType",
+                              "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml")
 
         # Imported media may use an extension the output package never declared
         # a Default content-type for (e.g. the output only had .jpeg media, but
