@@ -25,6 +25,8 @@ export const Step2Upload: React.FC = () => {
 
   const [pptDrag, setPptDrag] = useState(false);
   const [pdfDrag, setPdfDrag] = useState(false);
+  const [pptUploading, setPptUploading] = useState(false);
+  const [pdfUploading, setPdfUploading] = useState(false);
 
   const handleDrag = (e: React.DragEvent, type: 'ppt' | 'pdf') => {
     e.preventDefault();
@@ -63,20 +65,26 @@ export const Step2Upload: React.FC = () => {
   };
 
   const uploadPpt = async (file: File) => {
+    setPptUploading(true);
     try {
       await uploadInputPptFile(file);
       toast.success("Presentation content uploaded successfully!");
     } catch (err) {
       toast.error("Failed to upload presentation.");
+    } finally {
+      setPptUploading(false);
     }
   };
 
   const uploadPdf = async (file: File) => {
+    setPdfUploading(true);
     try {
       await uploadPdfFile(file);
       toast.success("PDF source document uploaded successfully!");
     } catch (err) {
       toast.error("Failed to upload PDF source.");
+    } finally {
+      setPdfUploading(false);
     }
   };
 
@@ -120,11 +128,11 @@ export const Step2Upload: React.FC = () => {
               onDragEnter={(e) => handleDrag(e, 'ppt')}
               onDragOver={(e) => handleDrag(e, 'ppt')}
               onDragLeave={(e) => handleDrag(e, 'ppt')}
-              onDrop={(e) => handleDrop(e, 'ppt')}
-              onClick={() => pptInputRef.current?.click()}
-              className={`dashed-drop flex flex-col items-center justify-center p-6 text-center cursor-pointer min-h-[160px] ${
-                pptDrag ? "drag-active border-[var(--color-amber)]" : ""
-              }`}
+              onDrop={(e) => !pptUploading && handleDrop(e, 'ppt')}
+              onClick={() => !pptUploading && pptInputRef.current?.click()}
+              className={`dashed-drop flex flex-col items-center justify-center p-6 text-center min-h-[160px] ${
+                pptUploading ? "cursor-wait" : "cursor-pointer"
+              } ${pptDrag ? "drag-active border-[var(--color-amber)]" : ""}`}
             >
               <input
                 type="file"
@@ -132,8 +140,14 @@ export const Step2Upload: React.FC = () => {
                 onChange={(e) => e.target.files?.[0] && uploadPpt(e.target.files[0])}
                 accept=".pptx"
                 className="hidden"
+                disabled={pptUploading}
               />
-              {inputPptName ? (
+              {pptUploading ? (
+                <div className="space-y-3">
+                  <Loader2 className="w-8 h-8 text-[var(--color-amber)] animate-spin mx-auto" />
+                  <p className="text-sm font-semibold text-[var(--color-navy)]">Processing presentation…</p>
+                </div>
+              ) : inputPptName ? (
                 <div className="space-y-2">
                   <div className="w-10 h-10 bg-emerald-50 text-[var(--color-success)] rounded-full flex items-center justify-center mx-auto">
                     <Check className="w-5 h-5" />
@@ -183,11 +197,11 @@ export const Step2Upload: React.FC = () => {
               onDragEnter={(e) => handleDrag(e, 'pdf')}
               onDragOver={(e) => handleDrag(e, 'pdf')}
               onDragLeave={(e) => handleDrag(e, 'pdf')}
-              onDrop={(e) => handleDrop(e, 'pdf')}
-              onClick={() => pdfInputRef.current?.click()}
-              className={`dashed-drop flex flex-col items-center justify-center p-6 text-center cursor-pointer min-h-[160px] ${
-                pdfDrag ? "drag-active border-[var(--color-amber)]" : ""
-              }`}
+              onDrop={(e) => !pdfUploading && handleDrop(e, 'pdf')}
+              onClick={() => !pdfUploading && pdfInputRef.current?.click()}
+              className={`dashed-drop flex flex-col items-center justify-center p-6 text-center min-h-[160px] ${
+                pdfUploading ? "cursor-wait" : "cursor-pointer"
+              } ${pdfDrag ? "drag-active border-[var(--color-amber)]" : ""}`}
             >
               <input
                 type="file"
@@ -195,8 +209,15 @@ export const Step2Upload: React.FC = () => {
                 onChange={(e) => e.target.files?.[0] && uploadPdf(e.target.files[0])}
                 accept=".pdf"
                 className="hidden"
+                disabled={pdfUploading}
               />
-              {sourcePdfName ? (
+              {pdfUploading ? (
+                <div className="space-y-3">
+                  <Loader2 className="w-8 h-8 text-[var(--color-navy)] animate-spin mx-auto" />
+                  <p className="text-sm font-semibold text-[var(--color-navy)]">Processing PDF…</p>
+                  <p className="text-xs text-[var(--color-muted)]">Extracting pages and captions, this can take a moment</p>
+                </div>
+              ) : sourcePdfName ? (
                 <div className="space-y-2">
                   <div className="w-10 h-10 bg-emerald-50 text-[var(--color-success)] rounded-full flex items-center justify-center mx-auto">
                     <Check className="w-5 h-5" />
@@ -303,10 +324,12 @@ export const Step2Upload: React.FC = () => {
                 convertDeck(4);
               }
             }}
-            disabled={!inputPptName}
+            disabled={!inputPptName || pptUploading || pdfUploading}
             className="px-6 py-3 bg-[var(--color-navy)] hover:bg-[var(--color-navy-light)] disabled:bg-neutral-300 text-white font-semibold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md"
           >
-            {sourcePdfName ? 'Proceed to PDF Figures' : 'Proceed to Conversion'}
+            {pptUploading || pdfUploading
+              ? 'Processing…'
+              : sourcePdfName ? 'Proceed to PDF Figures' : 'Proceed to Conversion'}
           </button>
         </div>
       )}

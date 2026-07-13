@@ -215,10 +215,14 @@ export const Step3Figures: React.FC = () => {
   const [showOnlyMentioned, setShowOnlyMentioned] = useState(true);
   
   // Selection box state
-  const [isDrawing, setIsDrawing] = useState(false);
+  type DragMode = 'draw' | 'move' | 'resize-tl' | 'resize-tr' | 'resize-bl' | 'resize-br' | null;
+  const [dragMode, setDragMode] = useState<DragMode>(null);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
+  const [dragOrigin, setDragOrigin] = useState({ x: 0, y: 0 });
+  const [boxOrigin, setBoxOrigin] = useState({ x: 0, y: 0, w: 0, h: 0 });
   const [currentBox, setCurrentBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [showAltWarning, setShowAltWarning] = useState(false);
+  const MIN_BOX_SIZE = 10;
 
   // Extract all figures/tables referenced in the source presentation
   const mentionedRefs = React.useMemo(() => {
@@ -361,38 +365,100 @@ export const Step3Figures: React.FC = () => {
     renderPage();
   }, [pdfDoc, currentPdfPage, zoom]);
 
-  // Handle Drag Selection
+  // Handle Drag Selection — supports drawing a new box, moving an existing
+  // one, and resizing from any of its four corners.
+  const getRelativePos = (e: React.MouseEvent) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(e.clientX - rect.left, rect.width)),
+      y: Math.max(0, Math.min(e.clientY - rect.top, rect.height)),
+    };
+  };
+
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!canvasRef.current || loading || extracting) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    setIsDrawing(true);
-    setStartPos({ x, y });
-    setCurrentBox({ x, y, w: 0, h: 0 });
+    const pos = getRelativePos(e);
+    setDragMode('draw');
+    setStartPos(pos);
+    setCurrentBox({ x: pos.x, y: pos.y, w: 0, h: 0 });
+  };
+
+  const handleBoxMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!canvasRef.current || !currentBox || loading || extracting) return;
+    setDragMode('move');
+    setDragOrigin(getRelativePos(e));
+    setBoxOrigin(currentBox);
+  };
+
+  const handleCornerMouseDown = (corner: 'tl' | 'tr' | 'bl' | 'br') => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!canvasRef.current || !currentBox || loading || extracting) return;
+    setDragMode(`resize-${corner}` as DragMode);
+    setDragOrigin(getRelativePos(e));
+    setBoxOrigin(currentBox);
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDrawing || !canvasRef.current || !currentBox) return;
+    if (!dragMode || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
-    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-    const y = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
+    const pos = getRelativePos(e);
 
-    const w = x - startPos.x;
-    const h = y - startPos.y;
+    if (dragMode === 'draw') {
+      const w = pos.x - startPos.x;
+      const h = pos.y - startPos.y;
+      setCurrentBox({
+        x: w < 0 ? pos.x : startPos.x,
+        y: h < 0 ? pos.y : startPos.y,
+        w: Math.abs(w),
+        h: Math.abs(h),
+      });
+      return;
+    }
 
-    setCurrentBox({
-      x: w < 0 ? x : startPos.x,
-      y: h < 0 ? y : startPos.y,
-      w: Math.abs(w),
-      h: Math.abs(h),
-    });
+    const dx = pos.x - dragOrigin.x;
+    const dy = pos.y - dragOrigin.y;
+
+    if (dragMode === 'move') {
+      const x = Math.max(0, Math.min(boxOrigin.x + dx, rect.width - boxOrigin.w));
+      const y = Math.max(0, Math.min(boxOrigin.y + dy, rect.height - boxOrigin.h));
+      setCurrentBox({ x, y, w: boxOrigin.w, h: boxOrigin.h });
+      return;
+    }
+
+    // Resize from whichever corner started the drag
+    let { x, y, w, h } = boxOrigin;
+    if (dragMode === 'resize-tl') {
+      x = boxOrigin.x + dx; y = boxOrigin.y + dy;
+      w = boxOrigin.w - dx; h = boxOrigin.h - dy;
+    } else if (dragMode === 'resize-tr') {
+      y = boxOrigin.y + dy;
+      w = boxOrigin.w + dx; h = boxOrigin.h - dy;
+    } else if (dragMode === 'resize-bl') {
+      x = boxOrigin.x + dx;
+      w = boxOrigin.w - dx; h = boxOrigin.h + dy;
+    } else if (dragMode === 'resize-br') {
+      w = boxOrigin.w + dx; h = boxOrigin.h + dy;
+    }
+
+    if (w < MIN_BOX_SIZE) {
+      if (dragMode === 'resize-tl' || dragMode === 'resize-bl') x -= (MIN_BOX_SIZE - w);
+      w = MIN_BOX_SIZE;
+    }
+    if (h < MIN_BOX_SIZE) {
+      if (dragMode === 'resize-tl' || dragMode === 'resize-tr') y -= (MIN_BOX_SIZE - h);
+      h = MIN_BOX_SIZE;
+    }
+    x = Math.max(0, Math.min(x, rect.width - w));
+    y = Math.max(0, Math.min(y, rect.height - h));
+    w = Math.min(w, rect.width - x);
+    h = Math.min(h, rect.height - y);
+
+    setCurrentBox({ x, y, w, h });
   };
 
   const handleMouseUp = async () => {
-    if (!isDrawing || !currentBox) return;
-    setIsDrawing(false);
+    setDragMode(null);
   };
 
   const executeExtraction = async () => {
@@ -597,7 +663,7 @@ export const Step3Figures: React.FC = () => {
 
           <span className="text-[10px] text-[#64748b] flex-1 text-left font-mono coords">
             {currentBox
-              ? `${Math.round(currentBox.w)} × ${Math.round(currentBox.h)} px selected`
+              ? `${Math.round(currentBox.w)} × ${Math.round(currentBox.h)} px selected — drag the box to move, drag a corner to resize`
               : 'Drag on the page below to select a region'}
           </span>
 
@@ -626,7 +692,8 @@ export const Step3Figures: React.FC = () => {
             <div className="absolute inset-0 pointer-events-none">
               {currentBox && (
                 <div
-                  className="absolute border-2 border-[#38bdf8] bg-[#38bdf8]/10 rounded-xs shadow-[0_0_8px_rgba(56,189,248,0.4)]"
+                  onMouseDown={handleBoxMouseDown}
+                  className="absolute border-2 border-[#38bdf8] bg-[#38bdf8]/10 rounded-xs shadow-[0_0_8px_rgba(56,189,248,0.4)] pointer-events-auto cursor-move"
                   style={{
                     left: currentBox.x,
                     top: currentBox.y,
@@ -637,11 +704,23 @@ export const Step3Figures: React.FC = () => {
                   <div className="absolute right-0 bottom-0 bg-[#38bdf8] text-black text-[8px] px-1 font-bold">
                     Crop Region
                   </div>
-                  {/* Select handles */}
-                  <div className="absolute -top-1 -left-1 w-2.5 h-2.5 bg-[#38bdf8] rounded-full border border-white"></div>
-                  <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-[#38bdf8] rounded-full border border-white"></div>
-                  <div className="absolute -bottom-1 -left-1 w-2.5 h-2.5 bg-[#38bdf8] rounded-full border border-white"></div>
-                  <div className="absolute -bottom-1 -right-1 w-2.5 h-2.5 bg-[#38bdf8] rounded-full border border-white"></div>
+                  {/* Drag handles — resize from any corner */}
+                  <div
+                    onMouseDown={handleCornerMouseDown('tl')}
+                    className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-[#38bdf8] rounded-full border border-white cursor-nwse-resize pointer-events-auto"
+                  ></div>
+                  <div
+                    onMouseDown={handleCornerMouseDown('tr')}
+                    className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-[#38bdf8] rounded-full border border-white cursor-nesw-resize pointer-events-auto"
+                  ></div>
+                  <div
+                    onMouseDown={handleCornerMouseDown('bl')}
+                    className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-[#38bdf8] rounded-full border border-white cursor-nesw-resize pointer-events-auto"
+                  ></div>
+                  <div
+                    onMouseDown={handleCornerMouseDown('br')}
+                    className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-[#38bdf8] rounded-full border border-white cursor-nwse-resize pointer-events-auto"
+                  ></div>
                 </div>
               )}
             </div>
