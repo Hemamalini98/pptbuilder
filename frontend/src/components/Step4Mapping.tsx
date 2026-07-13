@@ -3,13 +3,11 @@ import { useStore } from '../store';
 import { LayoutGrid, Play, AlertTriangle } from 'lucide-react';
 
 const getNormalizedRefName = (text: string) => {
-  const match = text.match(/\b(figure|fig\.?|f\.?)\s*([\d.]+)/i)
-    || text.match(/\binsert\s+(figure|fig\.?|f\.?)\s*([\d.]+)/i);
+  const match = text.match(/\binsert\s+(figure|fig\.?|f\.?)\s*([\d.-]+)/i);
   if (match) {
     return `figure ${match[2]}`;
   }
-  const matchTab = text.match(/\b(table|tab\.?|t\.?)\s*([\d.]+)/i)
-    || text.match(/\binsert\s+(table|tab\.?|t\.?)\s*([\d.]+)/i);
+  const matchTab = text.match(/\binsert\s+(table|tab\.?|t\.?)\s*([\d.-]+)/i);
   if (matchTab) {
     return `table ${matchTab[2]}`;
   }
@@ -25,8 +23,7 @@ const isShapeMissingFigure = (text: string, slideIndex: number, figures: any[]) 
     );
     return !isMapped;
   }
-  return /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(clean)
-    || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(clean);
+  return /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.-]+)?/i.test(clean);
 };
 
 export const Step4Mapping: React.FC = () => {
@@ -210,6 +207,8 @@ export const Step4Mapping: React.FC = () => {
                 top,
                 width,
                 height,
+                transform: shape.rotation ? `rotate(${shape.rotation}deg)` : undefined,
+                transformOrigin: shape.rotation ? 'center' : undefined,
                 ...bgStyle,
               }}
             >

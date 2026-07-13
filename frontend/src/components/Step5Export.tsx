@@ -4,13 +4,11 @@ import { Download, RefreshCw, AlertTriangle, FileJson, Check, LayoutGrid, BarCha
 import { toast } from 'sonner';
 
 const getNormalizedRefName = (text: string) => {
-  const match = text.match(/\b(figure|fig\.?|f\.?)\s*([\d.]+)/i)
-    || text.match(/\binsert\s+(figure|fig\.?|f\.?)\s*([\d.]+)/i);
+  const match = text.match(/\binsert\s+(figure|fig\.?|f\.?)\s*([\d.-]+)/i);
   if (match) {
     return `figure ${match[2]}`;
   }
-  const matchTab = text.match(/\b(table|tab\.?|t\.?)\s*([\d.]+)/i)
-    || text.match(/\binsert\s+(table|tab\.?|t\.?)\s*([\d.]+)/i);
+  const matchTab = text.match(/\binsert\s+(table|tab\.?|t\.?)\s*([\d.-]+)/i);
   if (matchTab) {
     return `table ${matchTab[2]}`;
   }
@@ -26,8 +24,7 @@ const isShapeMissingFigure = (text: string, slideIndex: number, figures: any[]) 
     );
     return !isMapped;
   }
-  return /\b(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*[\d.]+/i.test(clean)
-    || /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.]+)?/i.test(clean);
+  return /\binsert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*[\d.-]+)?/i.test(clean);
 };
 
 export const Step5Export: React.FC = () => {
@@ -278,10 +275,9 @@ export const Step5Export: React.FC = () => {
                     .join(' ')
                     .trim();
                   
-                  const isExactRef = /^(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart)\s*([\d.]+)[.:]?$/i;
-                  const isInsertRef = /^insert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*([\d.]+))?(?:\s+here)?[.:]?$/i;
+                  const isInsertRef = /^insert\s+(figure|fig\.?|f\.?|table|tab\.?|t\.?|chart|image)(?:\s*([\d.-]+))?(?:\s+here)?[.:]?$/i;
                   
-                  const match = text.match(isExactRef) || text.match(isInsertRef);
+                  const match = text.match(isInsertRef);
                   if (match) {
                     const figNum = match[2] || '';
                     missingRefs.push({ label: `${match[1].toUpperCase()}${figNum ? ' ' + figNum : ''}`, shapeIndex: s.index });

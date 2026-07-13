@@ -1,5 +1,16 @@
 import { create } from 'zustand';
 
+// Generate or retrieve session ID cookie
+(function getOrCreateSessionId() {
+  if (typeof document !== 'undefined') {
+    let sessionId = document.cookie.split('; ').find(row => row.startsWith('session_id='))?.split('=')[1];
+    if (!sessionId) {
+      sessionId = 'sess_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now();
+      document.cookie = `session_id=${sessionId}; path=/; max-ok=31536000; max-age=31536000; SameSite=Strict`;
+    }
+  }
+})();
+
 export interface ShapeStyle {
   font_name?: string | null;
   font_size_pt?: number | null;
@@ -36,6 +47,7 @@ export interface ShapeData {
   border?: {
     color?: string;
   };
+  rotation?: number;
 }
 
 export interface SlideData {
@@ -51,6 +63,25 @@ export interface StylesData {
   slideLayouts: any[];
   slides: SlideData[];
   theme?: any;
+  _meta?: {
+    warnings?: string[];
+    [key: string]: unknown;
+  };
+}
+
+export interface RunData {
+  text: string;
+  bold: boolean;
+  italic: boolean;
+}
+
+export interface AltTextEntry {
+  figure_key: string;   // e.g. "figure 1.1"
+  element: string;      // raw element number from Excel
+  chapter: string;
+  decorative: boolean;
+  alt_text_short: string;
+  alt_text_long: string;
 }
 
 export interface Figure {
@@ -60,7 +91,10 @@ export interface Figure {
   page: number; // 1-indexed
   filename: string; // unique identifier in backend uploads
   caption?: string; // extracted figure caption
+  captionRuns?: RunData[]; // per-run bold/italic from PDF
   credit?: string;  // extracted figure credit
+  creditRuns?: RunData[]; // per-run bold/italic from PDF
+  alt_text?: string; // accessibility alt text from Excel
   mappedTo?: {
     slideIndex: number;
     shapeIndex: number;
@@ -72,7 +106,9 @@ export interface PdfCaption {
   page: number; // 1-indexed
   label: string; // e.g. "Figure 1.1" or "Table 1"
   text: string;  // full caption text
+  runs?: RunData[]; // per-run bold/italic styling from PDF
   credit?: string; // credit text
+  creditRuns?: RunData[]; // per-run bold/italic for credit
 }
 
 interface StoredTemplate {
@@ -99,20 +135,30 @@ interface DeckforgeState {
   
   // Step 2: Source Uploads
   inputPptName: string | null;
+  detectedChapter: number | null;
   sourcePdfName: string | null;
   sourcePdfPages: number;
   isConverting: boolean;
   conversionProgress: number;
+  includeFigureCaptions: boolean;
+  includeTableCaptions: boolean;
+  setIncludeFigureCaptions: (val: boolean) => void;
+  setIncludeTableCaptions: (val: boolean) => void;
 
   // Step 3: PDF Figure Extraction
   pdfUrl: string | null;
   currentPdfPage: number; // 0-indexed
   figures: Figure[];
   pdfCaptions: PdfCaption[];
+  altTextEntries: AltTextEntry[];
+  altTextLoading: boolean;
   addFigure: (figure: Omit<Figure, 'id' | 'name'>) => void;
   renameFigure: (id: string, newName: string) => void;
-  updateFigureCaption: (id: string, caption: string, credit?: string) => void;
+  updateFigureCaption: (id: string, caption: string, credit?: string, captionRuns?: RunData[], creditRuns?: RunData[]) => void;
+  updateFigureCredit: (id: string, credit: string) => void;
+  updateFigureAltText: (id: string, alt_text: string) => void;
   deleteFigure: (id: string) => void;
+  uploadAltTextExcel: (file: File) => Promise<void>;
 
   // Step 4: Review & Mapping
   slides: SlideData[] | null;
@@ -151,16 +197,23 @@ export const useStore = create<DeckforgeState>((set, get) => ({
 
   // Step 2
   inputPptName: null,
+  detectedChapter: null,
   sourcePdfName: null,
   sourcePdfPages: 0,
   isConverting: false,
   conversionProgress: 0,
+  includeFigureCaptions: true,
+  includeTableCaptions: true,
+  setIncludeFigureCaptions: (val) => set({ includeFigureCaptions: val }),
+  setIncludeTableCaptions: (val) => set({ includeTableCaptions: val }),
 
   // Step 3
   pdfUrl: null,
   currentPdfPage: 0,
   figures: [],
   pdfCaptions: [],
+  altTextEntries: [],
+  altTextLoading: false,
 
   // Step 4
   slides: null,
@@ -250,9 +303,10 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       });
       const data = await res.json();
       if (data.ok) {
-        set({ 
+        set({
           inputPptName: file.name,
-          slides: data.slidesInfo?.slides || null
+          detectedChapter: data.chapterNumber ?? null,
+          slides: data.slidesInfo?.slides || null,
         });
       }
     } catch (err) {
@@ -298,13 +352,20 @@ export const useStore = create<DeckforgeState>((set, get) => ({
         name: f.name,
         filename: f.filename,
         caption: f.caption,
+        captionRuns: f.captionRuns,
         credit: f.credit,
+        creditRuns: f.creditRuns,
+        alt_text: f.alt_text,
       }));
 
       const res = await fetch('/api/process-ppt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ figures: figuresPayload }),
+        body: JSON.stringify({
+          figures: figuresPayload,
+          include_figure_captions: get().includeFigureCaptions,
+          include_table_captions: get().includeTableCaptions,
+        }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -364,9 +425,19 @@ export const useStore = create<DeckforgeState>((set, get) => ({
     }));
   },
 
-  updateFigureCaption: (id, caption, credit) => {
+  updateFigureCredit: (id, credit) => {
     set((state) => ({
-      figures: state.figures.map((f) => (f.id === id ? { ...f, caption, credit } : f)),
+      figures: state.figures.map((f) =>
+        f.id === id ? { ...f, credit } : f
+      ),
+    }));
+  },
+
+  updateFigureCaption: (id, caption, credit, captionRuns, creditRuns) => {
+    set((state) => ({
+      figures: state.figures.map((f) =>
+        f.id === id ? { ...f, caption, credit, captionRuns, creditRuns } : f
+      ),
     }));
   },
 
@@ -374,6 +445,38 @@ export const useStore = create<DeckforgeState>((set, get) => ({
     set((state) => ({
       figures: state.figures.filter((f) => f.id !== id),
     }));
+  },
+
+  updateFigureAltText: (id, alt_text) => {
+    set((state) => ({
+      figures: state.figures.map((f) => f.id === id ? { ...f, alt_text } : f),
+    }));
+  },
+
+  uploadAltTextExcel: async (file) => {
+    set({ altTextLoading: true });
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/parse-alttext-excel', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.detail || 'Parse failed');
+      const entries: AltTextEntry[] = data.entries;
+      // Auto-assign alt text to any figure whose name already matches a key
+      const altMap: Record<string, AltTextEntry> = {};
+      entries.forEach((e) => { altMap[e.figure_key] = e; });
+      set((state) => ({
+        altTextEntries: entries,
+        figures: state.figures.map((f) => {
+          const key = f.name.toLowerCase().replace(/([a-z]+)(\d)/, '$1 $2').replace(/(\d+)\.(\d+)/, '$1.$2');
+          const norm = key.replace(/^(figure|table)\s*/, (m: string) => m.trim() + ' ');
+          const entry = altMap[norm] ?? altMap[f.name.toLowerCase()];
+          return entry ? { ...f, alt_text: entry.alt_text_short } : f;
+        }),
+      }));
+    } finally {
+      set({ altTextLoading: false });
+    }
   },
 
   placeFigureOnShape: async (slideIndex, shapeIndex, figureId) => {
@@ -392,8 +495,17 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       formData.append('y_pt', String(targetShape.position.y_pt));
       formData.append('w_pt', String(targetShape.size.width_pt));
       formData.append('h_pt', String(targetShape.size.height_pt));
-      if (figure.caption) {
+      const isFigure = figure.name.toLowerCase().startsWith('figure');
+      const isTable = figure.name.toLowerCase().startsWith('table');
+      const captionAllowed =
+        (isFigure && get().includeFigureCaptions) ||
+        (isTable && get().includeTableCaptions) ||
+        (!isFigure && !isTable);
+      if (figure.caption && captionAllowed) {
         formData.append('caption', figure.caption);
+        if (figure.captionRuns?.length) {
+          formData.append('caption_runs', JSON.stringify(figure.captionRuns));
+        }
       }
 
       const res = await fetch('/api/add-image', {
@@ -430,8 +542,17 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       formData.append('y_pt', String(y_pt));
       formData.append('w_pt', String(w_pt));
       formData.append('h_pt', String(h_pt));
-      if (figure.caption) {
+      const isFigureC = figure.name.toLowerCase().startsWith('figure');
+      const isTableC = figure.name.toLowerCase().startsWith('table');
+      const captionAllowedC =
+        (isFigureC && get().includeFigureCaptions) ||
+        (isTableC && get().includeTableCaptions) ||
+        (!isFigureC && !isTableC);
+      if (figure.caption && captionAllowedC) {
         formData.append('caption', figure.caption);
+        if (figure.captionRuns?.length) {
+          formData.append('caption_runs', JSON.stringify(figure.captionRuns));
+        }
       }
 
       const res = await fetch('/api/add-image', {
@@ -494,6 +615,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       selectedTemplate: null,
       templateStyles: null,
       inputPptName: null,
+      detectedChapter: null,
       sourcePdfName: null,
       sourcePdfPages: 0,
       isConverting: false,

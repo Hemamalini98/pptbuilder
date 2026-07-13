@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import os
+import io
 
 INPUT_PATH = "input.pptx"
 TEMPLATE_STYLE_PATH = "template_styles.json"
@@ -17,6 +18,7 @@ COVER_IMAGE_PATH = "Picture1.png"
 PT_TO_EMU = 12700
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 ALIGN_MAP = {
     "l":    PP_ALIGN.LEFT,
@@ -110,7 +112,7 @@ def _set_solid_fill(parent_el, rgb):
 # ── APPLY HELPERS ────────────────────────────────────────────────────────────
 
 def apply_run_style(run, style, color_scheme, font_scheme=None):
-    """Apply font-level properties from a style dict to a run."""
+    """Apply font-level properties from a style dict to a run, preserving local color overrides."""
     if not style:
         return
     font = run.font
@@ -134,7 +136,7 @@ def apply_run_style(run, style, color_scheme, font_scheme=None):
         font.italic = style["italic"]
     if "underline" in style and isinstance(style["underline"], bool):
         font.underline = style["underline"]
-    if "color" in style:
+    if "color" in style and (font.color is None or font.color.type is None):
         rgb = resolve_color(style["color"], color_scheme)
         if rgb:
             try:
@@ -185,24 +187,38 @@ def apply_para_style(para, style, color_scheme):
                    pPr_el.find(f"{{{A_NS}}}buNone") is not None)
 
     if not has_bu_none:
-        if "marginLeft_pt" in style:
+        if "marginLeft_pt" in style or "indent_pt" in style:
             pPr = _get_or_create_pPr(p_el)
-            pPr.set("marL", str(int(style["marginLeft_pt"] * PT_TO_EMU)))
+            # Preserve input's explicit marL/indent — only apply template values when absent.
+            # This keeps hanging-indent geometry from the source doc intact.
+            if "marginLeft_pt" in style and pPr.get("marL") is None:
+                pPr.set("marL", str(int(style["marginLeft_pt"] * PT_TO_EMU)))
+            if "indent_pt" in style and pPr.get("indent") is None:
+                pPr.set("indent", str(int(style["indent_pt"] * PT_TO_EMU)))
 
         # Stamp template bullet char/font so the input master's circle bullet
-        # is replaced by the template's square (§ in Wingdings).
+        # is replaced by the template's square (§ in Wingdings), while preserving
+        # numbered/alphabetical lists (buAutoNum) from the input.
         if "bulletChar" in style or "bulletFont" in style:
             pPr = _get_or_create_pPr(p_el)
-            for bu_tag in [f"{{{A_NS}}}buFontTx", f"{{{A_NS}}}buFont",
-                           f"{{{A_NS}}}buChar", f"{{{A_NS}}}buAutoNum", f"{{{A_NS}}}buBlip"]:
-                for el in pPr.findall(bu_tag):
-                    pPr.remove(el)
-            if "bulletFont" in style:
-                bu_font = etree.SubElement(pPr, f"{{{A_NS}}}buFont")
-                bu_font.set("typeface", style["bulletFont"])
-            if "bulletChar" in style:
-                bu_char = etree.SubElement(pPr, f"{{{A_NS}}}buChar")
-                bu_char.set("char", style["bulletChar"])
+            has_auto_num = pPr.find(f"{{{A_NS}}}buAutoNum") is not None
+            
+            if has_auto_num:
+                # Keep auto-numbering, just clean up character/blip bullets if any exist
+                for bu_tag in [f"{{{A_NS}}}buFontTx", f"{{{A_NS}}}buChar", f"{{{A_NS}}}buBlip"]:
+                    for el in pPr.findall(bu_tag):
+                        pPr.remove(el)
+            else:
+                for bu_tag in [f"{{{A_NS}}}buFontTx", f"{{{A_NS}}}buFont",
+                               f"{{{A_NS}}}buChar", f"{{{A_NS}}}buAutoNum", f"{{{A_NS}}}buBlip"]:
+                    for el in pPr.findall(bu_tag):
+                        pPr.remove(el)
+                if "bulletFont" in style:
+                    bu_font = etree.SubElement(pPr, f"{{{A_NS}}}buFont")
+                    bu_font.set("typeface", style["bulletFont"])
+                if "bulletChar" in style:
+                    bu_char = etree.SubElement(pPr, f"{{{A_NS}}}buChar")
+                    bu_char.set("char", style["bulletChar"])
 
 
 def apply_body_properties(tf, body_props):
@@ -220,12 +236,13 @@ def apply_body_properties(tf, body_props):
             if key in body_props:
                 bodyPr.set(attr, str(int(body_props[key] * PT_TO_EMU)))
 
-    # Reset normAutofit scaling — the input may have been shrunk to fit larger
-    # fonts; after we stamp template-sized fonts the text fits at 100%.
-    normAF = bodyPr.find(f"{{{A_NS}}}normAutofit")
-    if normAF is not None:
-        normAF.attrib.pop("fontScale", None)
-        normAF.attrib.pop("lnSpcReduction", None)
+    # Force normAutofit scaling so PowerPoint automatically scales text down to prevent overflow.
+    # Remove any existing autofit tags to avoid conflicting definitions.
+    for af_tag in [f"{{{A_NS}}}normAutofit", f"{{{A_NS}}}spAutoFit", f"{{{A_NS}}}noAutofit"]:
+        for old in bodyPr.findall(af_tag):
+            bodyPr.remove(old)
+    etree.SubElement(bodyPr, f"{{{A_NS}}}normAutofit")
+
 
 
 def apply_shape_geometry(shape, template_shape):
@@ -374,6 +391,24 @@ def strip_copyright_from_masters(prs):
                 _remove_copyright_from_spTree(layout_spTree)
 
 
+def _relink_images(sp, source_shape, target_slide):
+    """Re-embed any images referenced by a deep-copied shape into the target
+    slide's package. copy.deepcopy() duplicates the r:embed/r:link XML
+    attributes verbatim, but those rIds only resolve within the *source*
+    part's relationships — the target slide has no such relationship, so
+    PowerPoint shows a broken-image icon unless the image is re-embedded and
+    the rId rewritten to point at the new relationship."""
+    source_part = source_shape.part
+    for attr in (f"{{{R_NS}}}embed", f"{{{R_NS}}}link"):
+        for blip in sp.iter(f"{{{A_NS}}}blip"):
+            old_rid = blip.get(attr)
+            if not old_rid:
+                continue
+            image_part = source_part.related_part(old_rid)
+            _, new_rid = target_slide.part.get_or_add_image_part(io.BytesIO(image_part.blob))
+            blip.set(attr, new_rid)
+
+
 def add_decorative_shapes(slide, layout_name, template_json, color_scheme, template_prs=None):
     """Insert non-placeholder decorative shapes (master + layout) behind slide content."""
     cSld   = slide._element.find(f"{{{P_NS}}}cSld")
@@ -386,12 +421,12 @@ def add_decorative_shapes(slide, layout_name, template_json, color_scheme, templ
         master = template_prs.slide_master
         try:
             layout_idx = int(layout_name.replace("slideLayout", "")) - 1
-            layout_deco = [s._element for s in master.slide_layouts[layout_idx].shapes
+            layout_deco = [s for s in master.slide_layouts[layout_idx].shapes
                            if not s.is_placeholder]
         except (ValueError, IndexError):
             layout_deco = []
 
-        master_deco = [s._element for s in master.shapes if not s.is_placeholder]
+        master_deco = [s for s in master.shapes if not s.is_placeholder]
 
         # Remove any existing non-placeholder shape that contains © (copyright).
         _remove_copyright_from_spTree(spTree)
@@ -409,8 +444,9 @@ def add_decorative_shapes(slide, layout_name, template_json, color_scheme, templ
 
         dk1 = color_scheme.get("dk1", "")
 
-        for sh_el in master_deco + layout_deco:
-            sp = copy.deepcopy(sh_el)
+        for sh in master_deco + layout_deco:
+            sp = copy.deepcopy(sh._element)
+            _relink_images(sp, sh, slide)
             cNvPr = sp.find(f".//{{{P_NS}}}cNvPr")
             if cNvPr is not None:
                 cNvPr.set("id", str(next_id))
@@ -844,10 +880,43 @@ def fix_cover_title(slide):
 
 # ── EXTRACTED IMAGE INSERTION ────────────────────────────────────────────────
 
-_FIG_PAT = re.compile(r'(figure|table)\s+([\d.]+)', re.IGNORECASE)
+_FIG_PAT = re.compile(r'insert\s+(figure|table)\s+([\d.-]+)', re.IGNORECASE)
 
 
-def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=None):
+def _add_styled_runs(p, runs, font_size_pt, font_family, font_color, template,
+                     fallback_bold=False, fallback_italic=False):
+    """Add per-run styled text to a python-pptx paragraph, preserving bold/italic from PDF."""
+    color_scheme = template.get("theme", {}).get("colorScheme", {}) if template else {}
+    font_scheme = template.get("theme", {}).get("fontScheme", {}) if template else {}
+
+    resolved_family = None
+    if font_family:
+        if font_family in THEME_FONTS:
+            key = THEME_FONT_KEY.get(font_family, "minor")
+            resolved_family = font_scheme.get(key) if font_scheme else None
+        else:
+            resolved_family = font_family
+
+    resolved_color = None
+    if font_color:
+        resolved_color = resolve_color(font_color, color_scheme)
+
+    for run_data in runs:
+        run = p.add_run()
+        run.text = run_data.get("text", "")
+        run.font.size = Pt(font_size_pt)
+        run.font.bold = run_data.get("bold", fallback_bold)
+        run.font.italic = run_data.get("italic", fallback_italic)
+        if resolved_family:
+            run.font.name = resolved_family
+        if resolved_color:
+            try:
+                run.font.color.rgb = resolved_color
+            except Exception:
+                pass
+
+
+def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=None, include_figure_captions=True, include_table_captions=True):
     """
     Scan every slide for shapes whose text matches 'Figure X.X' (e.g. 'Insert Figure 2.1 here').
     If a matching PNG exists in pdf_extracts/, replace the shape with that image at the same
@@ -868,16 +937,19 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
     if not fig_map:
         return []
 
-    # Build caption & credit maps: normalized figure key -> caption / credit text
+    # Build caption & credit maps: normalized figure key -> text / runs
     caption_map = {}
     credit_map = {}
+    caption_runs_map = {}
+    credit_runs_map = {}
+    alt_text_map = {}
     if figures_metadata:
         for fig in figures_metadata:
             name = fig.get("name")
             caption = fig.get("caption")
             credit = fig.get("credit")
             if name:
-                m = re.match(r"(figure|table)\s*([\d.]+)", name, re.IGNORECASE)
+                m = re.match(r"(figure|table)\s*([\d.-]+)", name, re.IGNORECASE)
                 if m:
                     key = f"{m.group(1).lower()} {m.group(2)}"
                 else:
@@ -886,11 +958,29 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                     caption_map[key] = caption
                 if credit:
                     credit_map[key] = credit
+                if fig.get("captionRuns"):
+                    caption_runs_map[key] = fig["captionRuns"]
+                if fig.get("creditRuns"):
+                    credit_runs_map[key] = fig["creditRuns"]
+                if fig.get("alt_text"):
+                    alt_text_map[key] = fig["alt_text"]
 
     used = []
     for slide_idx, slide in enumerate(prs.slides):
         replacements = []
-        for shape in slide.shapes:
+        all_shapes = []
+        def recurse(container):
+            for sh in container:
+                if sh.shape_type == 6: # Group shape (MSO_SHAPE_TYPE.GROUP = 6)
+                    try:
+                        recurse(sh.shapes)
+                    except Exception:
+                        pass
+                else:
+                    all_shapes.append(sh)
+        recurse(slide.shapes)
+
+        for shape in all_shapes:
             if not shape.has_text_frame:
                 continue
             text = shape.text_frame.text.strip()
@@ -958,6 +1048,21 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                     caption_text = original_text
 
             credit_text = credit_map.get(fig_key)
+            caption_runs = caption_runs_map.get(fig_key)
+            credit_runs = credit_runs_map.get(fig_key)
+
+            # Suppress caption/credit based on caller flags
+            _fig_type = fig_key.split()[0] if fig_key else ""
+            if _fig_type == "figure" and not include_figure_captions:
+                caption_text = None
+                credit_text = None
+                caption_runs = None
+                credit_runs = None
+            elif _fig_type == "table" and not include_table_captions:
+                caption_text = None
+                credit_text = None
+                caption_runs = None
+                credit_runs = None
 
             # Pre-resolve caption and credit styles to estimate required heights
             font_size_pt = 18.0
@@ -1094,11 +1199,24 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                 pic.left = left + int((w - pic.width) / 2)
                 pic.top = top + int((max_pic_h - pic.height) / 2)
 
+            # Apply alt text (WCAG / PPTX accessibility) — only set descr; title is a separate field.
+            # python-pptx auto-sets descr to the image filename on add_picture(); always overwrite it
+            # so images without meaningful alt text don't silently inherit the filename.
+            if pic:
+                try:
+                    cNvPr = pic._element[0][0]
+                    if fig_key in alt_text_map:
+                        cNvPr.set('descr', alt_text_map[fig_key])
+                    else:
+                        cNvPr.attrib.pop('descr', None)
+                except Exception:
+                    pass
+
             # Insert Caption Textbox if text exists
             if caption_text and pic:
-                # Force caption bounds to match actual final placed image bounds
+                # Start at image's left edge; extend to the right edge of the placeholder
                 cap_left = pic.left
-                cap_width = pic.width
+                cap_width = (left + w) - pic.left
 
                 # 1. Determine font sizes first
                 adjusted_font_size = font_size_pt
@@ -1154,29 +1272,33 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                 except Exception:
                     pass
                 p = tf.paragraphs[0]
-                p.text = caption_text
-                p.font.size = Pt(adjusted_font_size)
-                p.font.italic = font_italic
-                p.font.bold = font_bold
-
-                if font_family:
-                    if font_family in THEME_FONTS:
-                        key = THEME_FONT_KEY.get(font_family, "minor")
-                        font_scheme = template.get("theme", {}).get("fontScheme", {})
-                        resolved_fn = font_scheme.get(key) if font_scheme else None
-                        if resolved_fn:
-                            p.font.name = resolved_fn
-                    else:
-                        p.font.name = font_family
-
-                if font_color:
-                    color_scheme = template.get("theme", {}).get("colorScheme", {})
-                    rgb = resolve_color(font_color, color_scheme)
-                    if rgb:
-                        try:
-                            p.font.color.rgb = rgb
-                        except Exception:
-                            pass
+                if caption_runs:
+                    _add_styled_runs(p, caption_runs, adjusted_font_size,
+                                     font_family, font_color, template,
+                                     fallback_bold=font_bold, fallback_italic=font_italic)
+                else:
+                    run = p.add_run()
+                    run.text = caption_text
+                    run.font.size = Pt(adjusted_font_size)
+                    run.font.bold = font_bold
+                    run.font.italic = font_italic
+                    if font_family:
+                        if font_family in THEME_FONTS:
+                            key = THEME_FONT_KEY.get(font_family, "minor")
+                            font_scheme = template.get("theme", {}).get("fontScheme", {})
+                            resolved_fn = font_scheme.get(key) if font_scheme else None
+                            if resolved_fn:
+                                run.font.name = resolved_fn
+                        else:
+                            run.font.name = font_family
+                    if font_color:
+                        color_scheme = template.get("theme", {}).get("colorScheme", {})
+                        rgb = resolve_color(font_color, color_scheme)
+                        if rgb:
+                            try:
+                                run.font.color.rgb = rgb
+                            except Exception:
+                                pass
 
                 # 5. Create separate Credit Box if it exists
                 if credit_text:
@@ -1192,20 +1314,24 @@ def insert_figure_placeholders(prs, input_dir, figures_metadata=None, template=N
                     except Exception:
                         pass
                     p_cred = tf_cred.paragraphs[0]
-                    p_cred.text = credit_text
-                    
-                    p_cred.font.size = Pt(adjusted_cred_font_size)
-                    p_cred.font.italic = cred_italic
-                    p_cred.font.bold = cred_bold
-
-                    if cred_font_family in THEME_FONTS:
-                        key = THEME_FONT_KEY.get(cred_font_family, "minor")
-                        font_scheme = template.get("theme", {}).get("fontScheme", {})
-                        resolved_fn = font_scheme.get(key) if font_scheme else None
-                        if resolved_fn:
-                            p_cred.font.name = resolved_fn
+                    if credit_runs:
+                        _add_styled_runs(p_cred, credit_runs, adjusted_cred_font_size,
+                                         cred_font_family, cred_color, template,
+                                         fallback_bold=cred_bold, fallback_italic=cred_italic)
                     else:
-                        p_cred.font.name = cred_font_family
+                        run_cred = p_cred.add_run()
+                        run_cred.text = credit_text
+                        run_cred.font.size = Pt(adjusted_cred_font_size)
+                        run_cred.font.italic = cred_italic
+                        run_cred.font.bold = cred_bold
+                        if cred_font_family in THEME_FONTS:
+                            key = THEME_FONT_KEY.get(cred_font_family, "minor")
+                            font_scheme = template.get("theme", {}).get("fontScheme", {})
+                            resolved_fn = font_scheme.get(key) if font_scheme else None
+                            if resolved_fn:
+                                run_cred.font.name = resolved_fn
+                        else:
+                            run_cred.font.name = cred_font_family
 
                     if cred_color:
                         color_scheme = template.get("theme", {}).get("colorScheme", {})
@@ -1299,7 +1425,102 @@ def find_cover_image(input_path, explicit_cover=None):
     return candidates[0] if candidates else None
 
 
-def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None, figures_metadata=None):
+def fix_overflowing_textboxes(prs):
+    """
+    Detect slide text boxes and content placeholders for potential overflow
+    and scale down font sizes to fit the shape height.
+    """
+    import math
+    for slide_idx, slide in enumerate(prs.slides):
+        for shape in slide.shapes:
+            if not shape.has_text_frame or not shape.text_frame.text.strip():
+                continue
+            
+            # Skip title shapes because they are handled by fix_cover_title or don't need scaling down
+            try:
+                if shape.is_placeholder and str(shape.placeholder_format.type) in ["TITLE (1)", "CENTER_TITLE (3)"]:
+                    continue
+            except Exception:
+                pass
+            
+            tf = shape.text_frame
+            width_pt = shape.width / 12700
+            height_pt = shape.height / 12700
+            
+            # Read margins
+            txBody = tf._txBody
+            bodyPr = txBody.find(f"{{{A_NS}}}bodyPr")
+            lIns = 10.0
+            rIns = 10.0
+            tIns = 5.0
+            bIns = 5.0
+            if bodyPr is not None:
+                if bodyPr.get("lIns") is not None: lIns = int(bodyPr.get("lIns")) / 12700
+                if bodyPr.get("rIns") is not None: rIns = int(bodyPr.get("rIns")) / 12700
+                if bodyPr.get("tIns") is not None: tIns = int(bodyPr.get("tIns")) / 12700
+                if bodyPr.get("bIns") is not None: bIns = int(bodyPr.get("bIns")) / 12700
+            
+            avail_w = max(50.0, width_pt - lIns - rIns)
+            avail_h = max(20.0, height_pt - tIns - bIns)
+            
+            # Estimate text height at current font sizes
+            total_est_h = 0.0
+            para_details = [] # list of (para, current_font_size)
+            
+            for para in tf.paragraphs:
+                # Find font size (default to 20pt if not specified)
+                pt_sz = 20.0
+                if para.runs:
+                    for r in para.runs:
+                        if r.font.size is not None:
+                            pt_sz = r.font.size.pt
+                            break
+                elif para.font.size is not None:
+                    pt_sz = para.font.size.pt
+
+                # Space before / after / line spacing
+                sb = 0.0
+                sa = Pt(6).pt
+                if para.space_before is not None:
+                    sb = para.space_before.pt
+                if para.space_after is not None:
+                    sa = para.space_after.pt
+                ls = 1.15
+                if para.line_spacing is not None:
+                    if isinstance(para.line_spacing, float):
+                        ls = para.line_spacing
+                    else:
+                        ls = para.line_spacing.pt / pt_sz
+
+                text = para.text
+                if not text.strip():
+                    # Blank paragraph still contributes one line of vertical space
+                    total_est_h += (pt_sz * ls) + sb + sa
+                    continue
+
+                # Estimate line count: average char width is ~0.38 of font size
+                char_w = pt_sz * 0.38
+                est_text_w = len(text) * char_w
+                lines = max(1.0, math.ceil(est_text_w / avail_w))
+
+                para_h = lines * (pt_sz * ls) + sb + sa
+                total_est_h += para_h
+                para_details.append((para, pt_sz, para_h))
+            
+            if total_est_h > avail_h and para_details:
+                # Calculate scale factor and snap to nearest multiple of 2 (standard PPT steps)
+                scale = avail_h / total_est_h
+                for para, orig_sz, _ in para_details:
+                    scaled = orig_sz * scale
+                    # Floor to nearest even integer (e.g. 17.3 → 16, 22.9 → 22)
+                    new_sz = max(10.0, math.floor(scaled / 2) * 2)
+                    for r in para.runs:
+                        r.font.size = Pt(new_sz)
+                    if not para.runs:
+                        para.font.size = Pt(new_sz)
+
+
+def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None, figures_metadata=None, include_figure_captions=True, include_table_captions=True):
     """
     Apply template styles to input.pptx and save as output.pptx.
 
@@ -1368,6 +1589,7 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             s for s in slide.shapes
             if not s.is_placeholder and s.has_text_frame
             and any(p.text.strip() for p in s.text_frame.paragraphs)
+            and not _FIG_PAT.search(s.text_frame.text)
         ]
 
         # Apply background: layout-specific fill takes priority, fall back to master background
@@ -1381,6 +1603,14 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
         # Add decorative shapes (yellow bar, copyright, etc.) from master + layout
         add_decorative_shapes(slide, layout_name, template, color_scheme, template_prs)
 
+        # Collect placeholder indices present on this slide
+        present_indices = {sh.placeholder_format.idx for sh in slide.shapes if sh.is_placeholder and sh.placeholder_format is not None}
+
+        # Layout placeholder lookup used by geometry merge logic in both loops below
+        _layout_for_slide = next(
+            (l for l in template["slideLayouts"] if l["layoutName"] == layout_name), {}
+        )
+
         for shape in slide.shapes:
             if not shape.is_placeholder or not shape.has_text_frame:
                 continue
@@ -1388,6 +1618,13 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             ph_idx  = shape.placeholder_format.idx
             ph_type = str(shape.placeholder_format.type)
             is_title = any(t in ph_type for t in TITLE_PH_TYPES)
+            # Subtitle also must not inherit bullet styling from layout lstStyle
+            is_title_or_subtitle = is_title or "SUBTITLE" in ph_type
+
+            # If layout is comparison (slideLayout5) and the slide only has a single body content placeholder
+            # at idx 1 (idx 2 is missing), remap idx 1 to 2 so it styles as body content, not column title.
+            if layout_name == "slideLayout5" and ph_idx == 1 and 2 not in present_indices:
+                ph_idx = 2
 
             layout_ph   = get_layout_ph(template, layout_name, ph_idx)
             master_sh   = get_master_shape(template, ph_idx)
@@ -1400,7 +1637,30 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                         if src and src.get("position") and src.get("size"):
                             return src
                     return None
-                apply_shape_geometry(shape, _first_geo())
+                geo = _first_geo()
+                # Merge any unoccupied adjacent slot directly above so this shape
+                # aligns with sibling placeholders (e.g. figure) at the same y.
+                orig_ph_idx = shape.placeholder_format.idx
+                other_ph_indices = present_indices - {orig_ph_idx}
+                if geo and geo.get("position") and geo.get("size"):
+                    body_y = geo["position"]["y_pt"]
+                    body_h = geo["size"]["height_pt"]
+                    for _adj in _layout_for_slide.get("placeholders", []):
+                        _adj_idx = _adj.get("placeholder", {}).get("idx")
+                        if _adj_idx in other_ph_indices or _adj_idx == ph_idx:
+                            continue
+                        _adj_y = (_adj.get("position") or {}).get("y_pt")
+                        _adj_h = (_adj.get("size") or {}).get("height_pt")
+                        if _adj_y is None or _adj_h is None or _adj_y >= body_y:
+                            continue
+                        if abs((_adj_y + _adj_h) - body_y) <= 15:
+                            geo = {
+                                "position": {"x_pt": geo["position"]["x_pt"], "y_pt": _adj_y},
+                                "size": {"width_pt": geo["size"]["width_pt"],
+                                         "height_pt": (body_y + body_h) - _adj_y}
+                            }
+                            break
+                apply_shape_geometry(shape, geo)
 
             # Fill and border: cascade slide → layout → master (first source that has the key wins)
             def _first_with(key):
@@ -1412,13 +1672,11 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             apply_shape_fill(shape, _first_with("fill"), color_scheme)
             apply_shape_border(shape, _first_with("border"), color_scheme)
 
-            # Body properties: layout → master fallback
             bp = (layout_ph or {}).get("textBody", {}).get("bodyProperties", {})
             if not bp and master_sh:
                 bp = master_sh.get("textBody", {}).get("bodyProperties", {})
             apply_body_properties(shape.text_frame, bp)
 
-            # Apply text styles per paragraph, using the correct bullet level for layout styles
             for para in shape.text_frame.paragraphs:
                 level = para.level or 0
 
@@ -1432,6 +1690,13 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
 
                 # Build cascaded style: master → layout → slide-specific
                 final_style = merge(master_style, layout_style, slide_style)
+
+                # Title/subtitle placeholders never have bullets — strip any
+                # bullet keys that may have leaked in from the layout lstStyle.
+                if is_title_or_subtitle:
+                    for _bk in ('bulletChar', 'bulletFont', 'bulletColor',
+                                'marginLeft_pt', 'indent_pt'):
+                        final_style.pop(_bk, None)
 
                 apply_para_style(para, final_style, color_scheme)
 
@@ -1460,9 +1725,26 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
         # (nonph_text_shapes and real_ph_indices were collected before
         # add_decorative_shapes so that cloned master shapes like the copyright
         # rectangle are never treated as virtual content placeholders.)
+        # Build a pool of layout placeholder slots not already occupied by real placeholders,
+        # filtering out tiny "column header" slots (height < 60pt) so body text boxes
+        # are never squeezed into them regardless of the template's layout naming.
+        _MIN_BODY_SLOT_PT = 60
+        _body_slot_pool = [
+            ph.get("placeholder", {}).get("idx")
+            for ph in sorted(
+                _layout_for_slide.get("placeholders", []),
+                key=lambda p: p.get("placeholder", {}).get("idx", 999)
+            )
+            if ph.get("placeholder", {}).get("idx") not in real_ph_indices
+            and (ph.get("size") or {}).get("height_pt", 999) >= _MIN_BODY_SLOT_PT
+        ]
+
         virtual_start = (max(real_ph_indices) + 1) if real_ph_indices else 2
         for v_offset, shape in enumerate(nonph_text_shapes):
-            virtual_idx = virtual_start + v_offset
+            if v_offset < len(_body_slot_pool):
+                virtual_idx = _body_slot_pool[v_offset]
+            else:
+                virtual_idx = virtual_start + v_offset
             layout_ph_v = get_layout_ph(template, layout_name, virtual_idx)
             master_sh_v = get_master_shape(template, virtual_idx)
 
@@ -1475,7 +1757,30 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                         if src and src.get("position") and src.get("size"):
                             return src
                     return None
-                apply_shape_geometry(shape, _first_geo_v())
+                geo = _first_geo_v()
+                # If there's an unoccupied layout slot whose bottom edge sits just
+                # above this slot's top, merge them so the text box starts at the
+                # same y as sibling placeholders (e.g. the figure on the right).
+                if geo and geo.get("position") and geo.get("size"):
+                    body_y = geo["position"]["y_pt"]
+                    body_h = geo["size"]["height_pt"]
+                    for _adj in _layout_for_slide.get("placeholders", []):
+                        _adj_idx = _adj.get("placeholder", {}).get("idx")
+                        if _adj_idx in real_ph_indices or _adj_idx == virtual_idx:
+                            continue
+                        _adj_y = (_adj.get("position") or {}).get("y_pt")
+                        _adj_h = (_adj.get("size") or {}).get("height_pt")
+                        if _adj_y is None or _adj_h is None or _adj_y >= body_y:
+                            continue
+                        if abs((_adj_y + _adj_h) - body_y) <= 15:  # slots are contiguous
+                            merged_y = _adj_y
+                            geo = {
+                                "position": {"x_pt": geo["position"]["x_pt"], "y_pt": merged_y},
+                                "size": {"width_pt": geo["size"]["width_pt"],
+                                         "height_pt": (body_y + body_h) - merged_y}
+                            }
+                            break
+                apply_shape_geometry(shape, geo)
 
             bp_v = (layout_ph_v or {}).get("textBody", {}).get("bodyProperties", {})
             if not bp_v:
@@ -1489,6 +1794,7 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                 master_style = get_master_style_for_body(master_styles, level)
                 layout_style = get_layout_style(template, layout_name, virtual_idx, level)
                 final_style = merge(master_style, layout_style, {})
+
                 apply_para_style(para, final_style, color_scheme)
                 for run in para.runs:
                     apply_run_style(run, final_style, color_scheme, font_scheme)
@@ -1498,11 +1804,14 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             fix_cover_title(slide)
 
     input_dir = os.path.dirname(os.path.abspath(input_path))
-    used_figs = insert_figure_placeholders(prs, input_dir, figures_metadata, template=template)
+    used_figs = insert_figure_placeholders(prs, input_dir, figures_metadata, template=template, include_figure_captions=include_figure_captions, include_table_captions=include_table_captions)
 
     # Insert remaining loose figure extracts at the end
     skip_names = {x["dest_name"] for x in used_figs}
     insert_extracted_images(prs, input_dir, skip=skip_names)
+
+    # Fix overflowing textboxes after all shapes (including captions) are inserted
+    fix_overflowing_textboxes(prs)
 
     prs.save(output_path)
     print(f"\nDone. Saved to: {output_path}")
