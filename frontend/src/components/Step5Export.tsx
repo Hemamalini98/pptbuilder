@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
-import { Download, RefreshCw, AlertTriangle, FileJson, Check, LayoutGrid, BarChart2, ImageOff, Activity, ChevronDown, ChevronUp } from 'lucide-react';
+import { Download, RefreshCw, AlertTriangle, FileJson, Check, LayoutGrid, BarChart2, ImageOff, Activity, ChevronDown, ChevronUp, FileWarning } from 'lucide-react';
 import { toast } from 'sonner';
 
 const getNormalizedRefName = (text: string) => {
@@ -39,12 +39,18 @@ export const Step5Export: React.FC = () => {
     projectName
   } = useStore();
 
-  const [reportTab, setReportTab] = useState<'style' | 'figures' | 'accessibility'>('style');
+  const [reportTab, setReportTab] = useState<'style' | 'figures' | 'accessibility' | 'content'>('style');
   const [expandedSubCategories, setExpandedSubCategories] = useState<Record<string, boolean>>({});
   const [selectedSeverity, setSelectedSeverity] = useState<string>('Error');
   const [figureDiag, setFigureDiag] = useState<{ missing: string[]; unplaced: string[] } | null>(null);
   const [accessibilityDiag, setAccessibilityDiag] = useState<{ issues: string[] } | null>(null);
   const [reportData, setReportData] = useState<any[]>([]);
+  const [contentLoss, setContentLoss] = useState<{
+    slides: { slide: number; missing_text: string[] }[];
+    input_slide_count: number;
+    output_slide_count: number;
+    missing_slide_count: number;
+  } | null>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
 
   useEffect(() => {
@@ -52,7 +58,7 @@ export const Step5Export: React.FC = () => {
       .then(r => r.json())
       .then(d => { if (d.ok) setFigureDiag({ missing: d.missing, unplaced: d.unplaced }); })
       .catch(() => {});
-      
+
     fetch('/api/accessibility-report')
       .then(r => r.json())
       .then(d => { if (d.ok) setAccessibilityDiag({ issues: d.issues }); })
@@ -61,6 +67,20 @@ export const Step5Export: React.FC = () => {
     fetch('/api/report-data')
       .then(r => r.json())
       .then(d => { if (d.ok) setReportData(d.changes); })
+      .catch(() => {});
+
+    fetch('/api/content-loss-report')
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) {
+          setContentLoss({
+            slides: d.slides,
+            input_slide_count: d.input_slide_count,
+            output_slide_count: d.output_slide_count,
+            missing_slide_count: d.missing_slide_count,
+          });
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -375,7 +395,77 @@ export const Step5Export: React.FC = () => {
               </span>
             )}
           </button>
+          <button
+            onClick={() => setReportTab('content')}
+            className={`flex items-center gap-2 px-5 py-3 text-xs font-bold uppercase tracking-wider transition-all border-b-2 relative ${
+              reportTab === 'content'
+                ? 'border-[var(--color-amber)] text-[var(--color-navy)] bg-white'
+                : 'border-transparent text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100'
+            }`}
+          >
+            <FileWarning className="w-3.5 h-3.5" />
+            Content Loss Check
+            {contentLoss && (contentLoss.slides.length > 0 || contentLoss.missing_slide_count > 0) && (
+              <span className="ml-1 bg-rose-500 text-white text-[9px] font-black rounded-full px-1.5 py-0.5">
+                {contentLoss.slides.length + contentLoss.missing_slide_count}
+              </span>
+            )}
+          </button>
         </div>
+
+        {/* Content Loss Tab */}
+        {reportTab === 'content' && (
+          <div className="p-6 space-y-6 max-h-[620px] overflow-y-auto">
+            <div>
+              <h4 className="flex items-center gap-2 text-sm font-black text-rose-600 uppercase tracking-wider mb-2">
+                <FileWarning className="w-4 h-4" />
+                Input vs. Output Content Loss
+              </h4>
+              <p className="text-xs text-[var(--color-muted)] mb-4">
+                Flags text present in your uploaded PPTX that's missing from the styled output —
+                a sign the conversion dropped content, not just restyled it.
+              </p>
+
+              {!contentLoss ? (
+                <div className="text-xs text-zinc-400 italic py-6 text-center">Loading…</div>
+              ) : (
+                <>
+                  {contentLoss.missing_slide_count > 0 && (
+                    <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-800">
+                      <span className="font-bold">{contentLoss.missing_slide_count}</span> slide(s) from the
+                      input ({contentLoss.input_slide_count} total) are missing entirely from the output
+                      ({contentLoss.output_slide_count} total).
+                    </div>
+                  )}
+
+                  {contentLoss.slides.length === 0 && contentLoss.missing_slide_count === 0 ? (
+                    <div className="flex items-center gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                      <Check className="w-4 h-4" />
+                      No content loss detected — every text fragment from the input appears in the output.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {contentLoss.slides.map((s) => (
+                        <div key={s.slide} className="p-3 border border-rose-100 bg-rose-50/30 rounded-lg">
+                          <div className="text-[11px] font-black text-rose-700 uppercase tracking-wide mb-1.5">
+                            Slide {s.slide}
+                          </div>
+                          <ul className="space-y-1">
+                            {s.missing_text.map((t, i) => (
+                              <li key={i} className="text-xs text-zinc-700 pl-3 border-l-2 border-rose-300">
+                                {t}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Style Report Tab */}
         {reportTab === 'style' && (() => {

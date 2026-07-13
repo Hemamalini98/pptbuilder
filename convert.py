@@ -9,6 +9,8 @@ import re
 import sys
 import os
 import io
+import zipfile
+import shutil
 
 INPUT_PATH = "input.pptx"
 TEMPLATE_STYLE_PATH = "template_styles.json"
@@ -19,6 +21,7 @@ PT_TO_EMU = 12700
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 
 ALIGN_MAP = {
     "l":    PP_ALIGN.LEFT,
@@ -363,19 +366,36 @@ def _make_decorative_sp(sh_data, shape_id, color_scheme):
     return sp
 
 
-def _remove_copyright_from_spTree(spTree):
-    """Remove all non-placeholder shapes that contain the © symbol from an spTree element."""
+def _is_page_copyright_text(text):
+    """True if text looks like a page-level copyright/branding notice rather
+    than an image credit line (e.g. "© Asiseeit/Getty Image"). Photo/figure
+    credits contain © but cite a photographer or agency, never boilerplate
+    like "all rights reserved" — that phrase is the distinguishing signal."""
+    return "©" in text and "all rights reserved" in text.lower()
+
+
+def _remove_copyright_from_spTree(spTree, strict=False):
+    """Remove non-placeholder shapes that look like a page-level copyright
+    notice from an spTree element.
+
+    strict=False (default; used for master/layout shapes, which never carry
+    legitimate image credits) matches on the bare © symbol.
+    strict=True (used for actual slide content) additionally requires
+    "all rights reserved" so image/figure credit captions like
+    "© Asiseeit/Getty Image" are never mistaken for page branding and deleted.
+    """
+    is_match = _is_page_copyright_text if strict else (lambda t: "©" in t)
     for child in list(spTree):
         if child.find(f".//{{{P_NS}}}ph") is not None:
             continue
         c_text = "".join(t.text or "" for t in child.iter(f"{{{A_NS}}}t")).strip()
-        if "©" in c_text:
+        if is_match(c_text):
             spTree.remove(child)
             continue
-        # Also check group shapes whose nested text contains ©
+        # Also check group shapes whose nested text matches
         if child.tag.split("}")[-1] == "grpSp":
             inner_text = "".join(t.text or "" for t in child.iter(f"{{{A_NS}}}t")).strip()
-            if "©" in inner_text:
+            if is_match(inner_text):
                 spTree.remove(child)
 
 
@@ -409,11 +429,19 @@ def _relink_images(sp, source_shape, target_slide):
             blip.set(attr, new_rid)
 
 
-def add_decorative_shapes(slide, layout_name, template_json, color_scheme, template_prs=None):
-    """Insert non-placeholder decorative shapes (master + layout) behind slide content."""
+def add_decorative_shapes(slide, layout_name, template_json, color_scheme, template_prs=None, clone_shapes=True):
+    """Insert non-placeholder decorative shapes (master + layout) behind slide
+    content. Always strips any stray © copyright shape already on the slide.
+    Pass clone_shapes=False to skip the actual shape-cloning — used when the
+    real Slide Master/Layout swap will run later and slides will inherit the
+    template's decorative shapes natively instead."""
     cSld   = slide._element.find(f"{{{P_NS}}}cSld")
     spTree = cSld.find(f"{{{P_NS}}}spTree") if cSld is not None else None
     if spTree is None:
+        return
+
+    if not clone_shapes:
+        _remove_copyright_from_spTree(spTree, strict=True)
         return
 
     if template_prs is not None:
@@ -428,8 +456,8 @@ def add_decorative_shapes(slide, layout_name, template_json, color_scheme, templ
 
         master_deco = [s for s in master.shapes if not s.is_placeholder]
 
-        # Remove any existing non-placeholder shape that contains © (copyright).
-        _remove_copyright_from_spTree(spTree)
+        # Remove any existing page-copyright shape (not image credit captions).
+        _remove_copyright_from_spTree(spTree, strict=True)
 
         # Recompute insert point and next ID after removals
         insert_idx = 0
@@ -477,8 +505,8 @@ def add_decorative_shapes(slide, layout_name, template_json, color_scheme, templ
         sources = [s for s in sources if s.get("fill") and s["fill"] != "none"
                    and s.get("position") and s.get("size")]
 
-        # Remove any existing non-placeholder copyright shape
-        _remove_copyright_from_spTree(spTree)
+        # Remove any existing page-copyright shape (not image credit captions).
+        _remove_copyright_from_spTree(spTree, strict=True)
 
         insert_idx = 0
         for i, child in enumerate(spTree):
@@ -1520,6 +1548,305 @@ def fix_overflowing_textboxes(prs):
                         para.font.size = Pt(new_sz)
 
 
+def _layout_parts_by_name(zf):
+    """Return {cSld name: slideLayoutN.xml part name} for a package. First
+    occurrence of a duplicated name wins."""
+    result = {}
+    for name in zf.namelist():
+        if name.startswith("ppt/slideLayouts/slideLayout") and name.endswith(".xml") and "_rels" not in name:
+            root = etree.fromstring(zf.read(name))
+            cSld = root.find(f"{{{P_NS}}}cSld")
+            lname = cSld.get("name") if cSld is not None else None
+            if lname and lname not in result:
+                result[lname] = name
+    return result
+
+
+def _rels_part(part_name):
+    d, f = part_name.rsplit("/", 1)
+    return f"{d}/_rels/{f}.rels"
+
+
+def _next_media_part(existing_names, ext):
+    n = 1
+    while f"ppt/media/image{n}.{ext}" in existing_names:
+        n += 1
+    return f"ppt/media/image{n}.{ext}"
+
+
+_MASTER_SWAP_SUPPORTED_REL_TYPES = {"image", "theme", "themeOverride", "slideMaster", "slideLayout"}
+
+_IMAGE_EXT_CONTENT_TYPES = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+    "bmp": "image/bmp", "tiff": "image/tiff", "tif": "image/tiff",
+    "emf": "image/x-emf", "wmf": "image/x-wmf", "svg": "image/svg+xml",
+}
+
+
+def predict_master_swap_success(prs, template_prs, template_path):
+    """Cheap pre-check for whether apply_template_master() will likely succeed
+    for this input/template pair, without touching the (not-yet-saved) output
+    file. Mirrors apply_template_master's own matching + relationship-type
+    checks. Used to decide whether add_decorative_shapes() still needs to
+    manually clone shapes onto each slide (true master/layout inheritance
+    makes that redundant, and sometimes wrong, once the swap succeeds)."""
+    try:
+        input_layout_names = {lay.name for lay in prs.slide_masters[0].slide_layouts}
+        template_layout_names = {lay.name for lay in template_prs.slide_masters[0].slide_layouts}
+        matched = input_layout_names & template_layout_names
+        if not matched:
+            return False
+
+        with zipfile.ZipFile(template_path, "r") as tzf:
+            t_layouts = _layout_parts_by_name(tzf)
+            t_master_name = [n for n in tzf.namelist()
+                              if n.startswith("ppt/slideMasters/slideMaster") and n.endswith(".xml")
+                              and "_rels" not in n][0]
+            rels_to_check = [_rels_part(t_master_name)]
+            rels_to_check += [_rels_part(part) for name, part in t_layouts.items() if name in matched]
+
+            for rels_path in rels_to_check:
+                if rels_path not in tzf.namelist():
+                    return False
+                root = etree.fromstring(tzf.read(rels_path))
+                for rel in root:
+                    rtype = rel.get("Type", "").rsplit("/", 1)[-1]
+                    if rtype not in _MASTER_SWAP_SUPPORTED_REL_TYPES:
+                        return False
+        return True
+    except Exception:
+        return False
+
+
+def apply_template_master(output_path, template_path):
+    """Replace the output presentation's actual Slide Master/Layouts with the
+    template's, so slides added later in PowerPoint (via New Slide / Duplicate)
+    inherit the template's design instead of the original input deck's.
+
+    convert.py otherwise only restyles existing slide shapes in place — the
+    underlying Slide Master/Layout gallery stays the input's own, so any new
+    slide a user adds after conversion would silently revert to the old look.
+
+    Layouts are matched between template and output by name (e.g. "Title and
+    Content"). Every matched layout is transplanted from the template. Any
+    output layout with no template counterpart is dropped and slides using it
+    are redirected to "Title and Content" (or the first matched layout if the
+    template doesn't have one).
+    """
+    with zipfile.ZipFile(template_path, "r") as tzf, zipfile.ZipFile(output_path, "r") as ozf:
+        t_layouts = _layout_parts_by_name(tzf)
+        o_layouts = _layout_parts_by_name(ozf)
+        matched_names = sorted(set(t_layouts) & set(o_layouts))
+        if not matched_names:
+            print("  Warning: template shares no layout names with the output deck — "
+                  "skipping slide master replacement.")
+            return
+
+        fallback_name = "Title and Content" if "Title and Content" in matched_names else matched_names[0]
+        fallback_basename = o_layouts[fallback_name].rsplit("/", 1)[-1]
+
+        other_layout_names = [p for name, p in o_layouts.items() if name not in matched_names]
+        removed_basenames = {n.rsplit("/", 1)[-1] for n in other_layout_names}
+
+        # basename map: template layout file -> output layout file, for matched layouts only
+        basename_map = {t_layouts[name].rsplit("/", 1)[-1]: o_layouts[name].rsplit("/", 1)[-1]
+                        for name in matched_names}
+
+        o_master_candidates = [n for n in ozf.namelist()
+                                if n.startswith("ppt/slideMasters/slideMaster") and n.endswith(".xml")
+                                and "_rels" not in n]
+        if not o_master_candidates:
+            print("  Warning: could not locate output slide master — skipping slide master replacement.")
+            return
+        o_master_name = o_master_candidates[0]
+        o_master_rels_root = etree.fromstring(ozf.read(_rels_part(o_master_name)))
+
+        o_theme_name = "ppt/theme/theme1.xml"
+        for rel in o_master_rels_root:
+            if rel.get("Type", "").endswith("/theme"):
+                o_theme_name = "ppt/theme/" + rel.get("Target").rsplit("/", 1)[-1]
+                break
+
+        t_master_name = [n for n in tzf.namelist()
+                          if n.startswith("ppt/slideMasters/slideMaster") and n.endswith(".xml")
+                          and "_rels" not in n][0]
+
+        existing_media = {n for n in ozf.namelist() if n.startswith("ppt/media/")}
+        existing_theme_overrides = {n for n in ozf.namelist() if n.startswith("ppt/theme/themeOverride")}
+        media_map = {}
+        theme_override_map = {}
+        new_files = {}
+        new_theme_override_paths = []
+        new_media_extensions = set()
+        removed_files = set()
+
+        def import_media(t_media_path):
+            if t_media_path in media_map:
+                return media_map[t_media_path]
+            ext = t_media_path.rsplit(".", 1)[-1]
+            new_path = _next_media_part(existing_media, ext)
+            existing_media.add(new_path)
+            media_map[t_media_path] = new_path
+            new_files[new_path] = tzf.read(t_media_path)
+            new_media_extensions.add(ext.lower())
+            return new_path
+
+        def import_theme_override(t_path):
+            if t_path in theme_override_map:
+                return theme_override_map[t_path]
+            n = 1
+            while f"ppt/theme/themeOverride{n}.xml" in existing_theme_overrides:
+                n += 1
+            new_path = f"ppt/theme/themeOverride{n}.xml"
+            existing_theme_overrides.add(new_path)
+            theme_override_map[t_path] = new_path
+            new_files[new_path] = tzf.read(t_path)
+            new_theme_override_paths.append(new_path)
+            return new_path
+
+        def remap_rels(rels_bytes):
+            """Rewrite a copied template rels part so its Targets point at the
+            output's own master/layout/theme filenames and newly-imported media,
+            while keeping the same rIds where possible. Relationships to a
+            template layout with no match in the output are dropped entirely —
+            the caller must also prune any master sldLayoutId referencing that
+            dropped rId."""
+            root = etree.fromstring(rels_bytes)
+            dropped_rids = set()
+            for rel in list(root):
+                rtype = rel.get("Type", "")
+                target = rel.get("Target", "")
+                if rtype.endswith("/image"):
+                    t_media_path = "ppt/" + target.replace("../", "")
+                    new_media_path = import_media(t_media_path)
+                    rel.set("Target", "../media/" + new_media_path.rsplit("/", 1)[-1])
+                elif rtype.endswith("/theme"):
+                    rel.set("Target", "../theme/" + o_theme_name.rsplit("/", 1)[-1])
+                elif rtype.endswith("/themeOverride"):
+                    t_theme_override_path = "ppt/theme/" + target.rsplit("/", 1)[-1]
+                    new_path = import_theme_override(t_theme_override_path)
+                    rel.set("Target", "../theme/" + new_path.rsplit("/", 1)[-1])
+                elif rtype.endswith("/slideMaster"):
+                    rel.set("Target", "../slideMasters/" + o_master_name.rsplit("/", 1)[-1])
+                elif rtype.endswith("/slideLayout"):
+                    t_basename = target.rsplit("/", 1)[-1]
+                    if t_basename in basename_map:
+                        rel.set("Target", "../slideLayouts/" + basename_map[t_basename])
+                    else:
+                        # Template layout with no counterpart in the output — not
+                        # being imported, so this relationship must not exist.
+                        dropped_rids.add(rel.get("Id"))
+                        root.remove(rel)
+            return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True), dropped_rids
+
+        def prune_layout_id_list(master_xml_bytes, dropped_rids):
+            if not dropped_rids:
+                return master_xml_bytes
+            root = etree.fromstring(master_xml_bytes)
+            lst = root.find(f"{{{P_NS}}}sldLayoutIdLst")
+            if lst is not None:
+                for child in list(lst):
+                    rid = child.get(f"{{{R_NS}}}id")
+                    if rid in dropped_rids:
+                        lst.remove(child)
+            return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+        master_rels_bytes, master_dropped_rids = remap_rels(tzf.read(_rels_part(t_master_name)))
+        new_files[o_master_name] = prune_layout_id_list(tzf.read(t_master_name), master_dropped_rids)
+        new_files[_rels_part(o_master_name)] = master_rels_bytes
+
+        for name in matched_names:
+            t_name = t_layouts[name]
+            o_name = o_layouts[name]
+            layout_rels_bytes, _ = remap_rels(tzf.read(_rels_part(t_name)))
+            new_files[o_name] = tzf.read(t_name)
+            new_files[_rels_part(o_name)] = layout_rels_bytes
+
+        t_theme_name = "ppt/theme/theme1.xml"
+        t_master_rels_peek = etree.fromstring(tzf.read(_rels_part(t_master_name)))
+        for rel in t_master_rels_peek:
+            if rel.get("Type", "").endswith("/theme"):
+                t_theme_name = "ppt/" + rel.get("Target").replace("../", "")
+                break
+        new_files[o_theme_name] = tzf.read(t_theme_name)
+
+        for n in other_layout_names:
+            removed_files.add(n)
+            removed_files.add(_rels_part(n))
+
+        slide_rels_names = [n for n in ozf.namelist()
+                             if n.startswith("ppt/slides/_rels/") and n.endswith(".xml.rels")]
+        for rels_name in slide_rels_names:
+            root = etree.fromstring(ozf.read(rels_name))
+            changed = False
+            for rel in root:
+                if rel.get("Type", "").endswith("/slideLayout"):
+                    basename = rel.get("Target", "").rsplit("/", 1)[-1]
+                    if basename in removed_basenames:
+                        rel.set("Target", "../slideLayouts/" + fallback_basename)
+                        changed = True
+            if changed:
+                new_files[rels_name] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+        ct_root = etree.fromstring(ozf.read("[Content_Types].xml"))
+        for override in list(ct_root):
+            if override.get("PartName", "").lstrip("/") in removed_files:
+                ct_root.remove(override)
+        for new_path in new_theme_override_paths:
+            override = etree.SubElement(ct_root, f"{{{CT_NS}}}Override")
+            override.set("PartName", "/" + new_path)
+            override.set("ContentType", "application/vnd.openxmlformats-officedocument.themeOverride+xml")
+
+        # Imported media may use an extension the output package never declared
+        # a Default content-type for (e.g. the output only had .jpeg media, but
+        # the template's logo is .jpg) — without this, the part is unreadable.
+        existing_default_exts = {d.get("Extension", "").lower()
+                                  for d in ct_root.findall(f"{{{CT_NS}}}Default")}
+        for ext in new_media_extensions - existing_default_exts:
+            content_type = _IMAGE_EXT_CONTENT_TYPES.get(ext, f"image/{ext}")
+            default = etree.SubElement(ct_root, f"{{{CT_NS}}}Default")
+            default.set("Extension", ext)
+            default.set("ContentType", content_type)
+
+        new_files["[Content_Types].xml"] = etree.tostring(ct_root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+        # Safety check: every relationship about to be written must resolve to a
+        # part that will actually exist in the final package. If anything is
+        # inconsistent (e.g. an unexpected template structure), abort the swap
+        # and leave the original master/layouts untouched rather than write a
+        # package PowerPoint will flag as needing repair.
+        final_names = (set(ozf.namelist()) - removed_files) | set(new_files.keys())
+        for rels_path, rels_bytes in new_files.items():
+            if not rels_path.endswith(".rels"):
+                continue
+            base_dir = rels_path.rsplit("/_rels/", 1)[0]
+            root = etree.fromstring(rels_bytes)
+            for rel in root:
+                target = rel.get("Target", "")
+                if target.startswith("http"):
+                    continue
+                resolved = os.path.normpath(os.path.join(base_dir, target)).replace(os.sep, "/")
+                if resolved not in final_names:
+                    print(f"  Warning: slide master replacement would leave a broken relationship "
+                          f"({rels_path} -> {target}) — skipping the swap to avoid corrupting the "
+                          f"presentation. The original template design won't apply to new slides "
+                          f"added later, but the current deck stays valid.")
+                    return
+
+        tmp_path = output_path + ".tmp"
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as nzf:
+            for item in ozf.infolist():
+                if item.filename in removed_files or item.filename in new_files:
+                    continue
+                nzf.writestr(item, ozf.read(item.filename))
+            for path, data in new_files.items():
+                nzf.writestr(path, data)
+
+    shutil.move(tmp_path, output_path)
+    print(f"  Slide master/layouts replaced with template's design "
+          f"({len(other_layout_names)} unsupported layout(s) redirected to 'Title and Content').")
+
+
 def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None, figures_metadata=None, include_figure_captions=True, include_table_captions=True):
     """
     Apply template styles to input.pptx and save as output.pptx.
@@ -1553,6 +1880,16 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
         template_prs = Presentation(template_pptx_path)
 
     prs = Presentation(input_path)
+
+    # If the real Slide Master/Layout swap (apply_template_master, run after
+    # save) is expected to succeed for this input/template pair, slides will
+    # inherit the template's decorative shapes natively — cloning them onto
+    # each slide individually would just duplicate (or mismatch) them. Only
+    # fall back to manual per-slide cloning when the swap is predicted to fail.
+    will_replace_master = (
+        template_prs is not None
+        and predict_master_swap_success(prs, template_prs, template_pptx_path)
+    )
 
     # Strip © copyright shapes from input masters/layouts so the template
     # copyright added to each slide spTree is the only one that appears.
@@ -1590,6 +1927,11 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             if not s.is_placeholder and s.has_text_frame
             and any(p.text.strip() for p in s.text_frame.paragraphs)
             and not _FIG_PAT.search(s.text_frame.text)
+            # Exclude image/figure credit captions (e.g. "© Asiseeit/Getty
+            # Image") — they're small labels tied to a specific picture, not
+            # body content, and must never be resized/repositioned into a
+            # template content-placeholder slot like a genuine second column.
+            and "©" not in s.text_frame.text
         ]
 
         # Apply background: layout-specific fill takes priority, fall back to master background
@@ -1600,8 +1942,14 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
                 break
         apply_slide_background(slide, layout_bg_fill or master_bg_fill, color_scheme)
 
-        # Add decorative shapes (yellow bar, copyright, etc.) from master + layout
-        add_decorative_shapes(slide, layout_name, template, color_scheme, template_prs)
+        # Add decorative shapes (yellow bar, copyright, etc.) from master + layout.
+        # Shape cloning is skipped when the real Slide Master/Layout swap will
+        # run later — the slide inherits the template's decorative shapes
+        # natively in that case, and manual cloning here would duplicate them
+        # or pull in shapes from a differently-matched layout that doesn't
+        # apply to this slide. The stray-copyright cleanup still always runs.
+        add_decorative_shapes(slide, layout_name, template, color_scheme, template_prs,
+                               clone_shapes=not will_replace_master)
 
         # Collect placeholder indices present on this slide
         present_indices = {sh.placeholder_format.idx for sh in slide.shapes if sh.is_placeholder and sh.placeholder_format is not None}
@@ -1814,6 +2162,10 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
     fix_overflowing_textboxes(prs)
 
     prs.save(output_path)
+
+    if template_pptx_path and os.path.exists(template_pptx_path):
+        apply_template_master(output_path, template_pptx_path)
+
     print(f"\nDone. Saved to: {output_path}")
     return used_figs
 

@@ -19,6 +19,13 @@ from convert import convert
 
 app = FastAPI(title="PPT Builder API")
 
+
+def styled_output_filename(content_pptx_path):
+    """Derive the styled output's filename from the uploaded content file's
+    own name, e.g. "Burke3e_Ch02 PPT.pptx" -> "Burke3e_Ch02 PPT_styled.pptx"."""
+    base = os.path.splitext(os.path.basename(content_pptx_path or "content"))[0]
+    return f"{base}_styled.pptx"
+
 # Enable CORS for frontend development
 app.add_middleware(
     CORSMiddleware,
@@ -357,7 +364,12 @@ async def select_template(data: dict, session_id: str = Depends(get_session_id))
 async def upload_ppt(file: UploadFile = File(...), session_id: str = Depends(get_session_id)):
     try:
         session_upload_dir = get_session_upload_dir(session_id)
-        path = os.path.join(session_upload_dir, "uploaded_content.pptx")
+        # Keep the uploaded file's own name (sanitized) instead of a fixed
+        # "uploaded_content.pptx", so it's identifiable in the session folder.
+        safe_name = os.path.basename(file.filename or "uploaded_content.pptx")
+        if not safe_name.lower().endswith(".pptx"):
+            safe_name += ".pptx"
+        path = os.path.join(session_upload_dir, safe_name)
         with open(path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
@@ -405,7 +417,7 @@ async def process_ppt(payload: dict = None, session_id: str = Depends(get_sessio
                         dest_name = f"{name.lower()}.png"
                     shutil.copy(src_path, os.path.join(extracts_dir, dest_name))
 
-        output_path = os.path.join(session_upload_dir, "styled_output.pptx")
+        output_path = os.path.join(session_upload_dir, styled_output_filename(state["content_pptx"]))
         # Run conversion style formatting and automatic figure insertion
         used_figs = convert(state["content_pptx"], state["template_style_json"], output_path, apply_geometry=True, figures_metadata=figures, include_figure_captions=include_figure_captions, include_table_captions=include_table_captions)
         state["styled_pptx"] = output_path
@@ -689,7 +701,7 @@ async def download_pptx(session_id: str = Depends(get_session_id)):
     return FileResponse(
         target_pptx,
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        filename="styled_presentation.pptx"
+        filename=os.path.basename(target_pptx)
     )
 
 
@@ -698,8 +710,8 @@ async def download_excel(customerName: str = "", projectName: str = "", session_
     state = get_session_state(session_id)
     input_path = state.get("content_pptx")
     session_upload_dir = get_session_upload_dir(session_id)
-    output_path = state.get("styled_pptx") or os.path.join(session_upload_dir, "styled_output.pptx")
-    
+    output_path = state.get("styled_pptx") or os.path.join(session_upload_dir, styled_output_filename(input_path))
+
     if not input_path or not os.path.exists(input_path):
         raise HTTPException(status_code=400, detail="Missing source presentation file.")
     if not os.path.exists(output_path):
@@ -733,7 +745,7 @@ async def download_excel(customerName: str = "", projectName: str = "", session_
 async def get_report_data(session_id: str = Depends(get_session_id)):
     state = get_session_state(session_id)
     session_upload_dir = get_session_upload_dir(session_id)
-    output_path = os.path.join(session_upload_dir, "styled_output.pptx")
+    output_path = state.get("styled_pptx") or os.path.join(session_upload_dir, styled_output_filename(state.get("content_pptx")))
     if not state["content_pptx"] or not os.path.exists(output_path):
         return {"ok": False, "changes": []}
     try:
@@ -742,6 +754,24 @@ async def get_report_data(session_id: str = Depends(get_session_id)):
         return {"ok": True, "changes": changes}
     except Exception as e:
         return {"ok": False, "detail": str(e), "changes": []}
+
+@app.get("/api/content-loss-report")
+async def get_content_loss_report(session_id: str = Depends(get_session_id)):
+    """Flag any text present in the uploaded input PPTX that's missing from
+    the corresponding slide in the styled output — a sign of real content
+    loss during conversion, not just restyling."""
+    state = get_session_state(session_id)
+    session_upload_dir = get_session_upload_dir(session_id)
+    input_path = state.get("content_pptx")
+    output_path = state.get("styled_pptx") or os.path.join(session_upload_dir, styled_output_filename(input_path))
+    if not input_path or not os.path.exists(input_path) or not os.path.exists(output_path):
+        return {"ok": False, "slides": [], "input_slide_count": 0, "output_slide_count": 0, "missing_slide_count": 0}
+    try:
+        from report import collect_content_loss
+        result = collect_content_loss(input_path, output_path)
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "detail": str(e), "slides": [], "input_slide_count": 0, "output_slide_count": 0, "missing_slide_count": 0}
 
 @app.get("/api/figure-diagnostics")
 async def get_figure_diagnostics(session_id: str = Depends(get_session_id)):
@@ -763,7 +793,7 @@ async def get_figure_diagnostics(session_id: str = Depends(get_session_id)):
 async def get_accessibility_report(session_id: str = Depends(get_session_id)):
     state = get_session_state(session_id)
     session_upload_dir = get_session_upload_dir(session_id)
-    output_path = state.get("styled_pptx") or os.path.join(session_upload_dir, "styled_output.pptx")
+    output_path = state.get("styled_pptx") or os.path.join(session_upload_dir, styled_output_filename(state.get("content_pptx")))
     if not os.path.exists(output_path):
         return {"ok": False, "issues": []}
     try:

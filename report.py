@@ -285,6 +285,59 @@ def collect_changes(input_path, output_path):
     return slides_data
 
 
+def _slide_text_fragments(slide):
+    """Return every non-empty paragraph/cell text fragment on a slide.
+
+    Compares at the paragraph level (all runs in a paragraph joined), not
+    per-run — restyling logic (e.g. splitting a title's "(1 of 2)" suffix
+    into its own run for a smaller font size) changes run boundaries without
+    losing any characters, and a per-run comparison would misreport that as
+    content loss."""
+    fragments = []
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            for para in shape.text_frame.paragraphs:
+                t = para.text.strip()
+                if t:
+                    fragments.append(t)
+        if shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    t = cell.text.strip()
+                    if t:
+                        fragments.append(t)
+    return fragments
+
+
+def collect_content_loss(input_path, output_path):
+    """Compare input vs output slide-by-slide and flag any input text fragment
+    (a run or table cell) that doesn't appear anywhere in the corresponding
+    output slide — a sign the conversion dropped real content, not just
+    restyled it. Slide-count mismatches (e.g. the input has a slide the
+    output doesn't) are reported separately as missing_slides."""
+    prs_in = Presentation(input_path)
+    prs_out = Presentation(output_path)
+
+    n_in = len(prs_in.slides)
+    n_out = len(prs_out.slides)
+
+    slides_data = []
+    for i in range(min(n_in, n_out)):
+        in_fragments = _slide_text_fragments(prs_in.slides[i])
+        out_fragments = _slide_text_fragments(prs_out.slides[i])
+        out_joined = " | ".join(out_fragments)
+        missing = [t for t in in_fragments if t not in out_joined]
+        if missing:
+            slides_data.append({"slide": i + 1, "missing_text": missing})
+
+    return {
+        "slides": slides_data,
+        "input_slide_count": n_in,
+        "output_slide_count": n_out,
+        "missing_slide_count": max(0, n_in - n_out),
+    }
+
+
 def collect_figure_diagnostics(input_path, extracts_dir):
     """Scan input PPT for requested figures, compare against PDF crops."""
     if not os.path.exists(input_path):

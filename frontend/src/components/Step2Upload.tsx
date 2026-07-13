@@ -16,7 +16,8 @@ export const Step2Upload: React.FC = () => {
     setIncludeTableCaptions,
     uploadInputPptFile,
     uploadPdfFile,
-    setStep
+    setStep,
+    convertDeck
   } = useStore();
 
   const pptInputRef = useRef<HTMLInputElement>(null);
@@ -293,11 +294,19 @@ export const Step2Upload: React.FC = () => {
             </span>
           </div>
           <button
-            onClick={() => setStep(3)}
-            disabled={!inputPptName || !sourcePdfName}
+            onClick={() => {
+              if (sourcePdfName) {
+                setStep(3);
+              } else {
+                // No PDF source — nothing to map figures from, so skip
+                // straight to conversion instead of blocking on Step 3.
+                convertDeck(4);
+              }
+            }}
+            disabled={!inputPptName}
             className="px-6 py-3 bg-[var(--color-navy)] hover:bg-[var(--color-navy-light)] disabled:bg-neutral-300 text-white font-semibold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md"
           >
-            Proceed to PDF Figures
+            {sourcePdfName ? 'Proceed to PDF Figures' : 'Proceed to Conversion'}
           </button>
         </div>
       )}
