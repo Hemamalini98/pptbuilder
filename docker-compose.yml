@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8001:8001"
+    env_file:
+      - .env
     volumes:
       - uploads_data:/app/uploads
     restart: unless-stopped
