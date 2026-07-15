@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import shutil
 import json
 import re
@@ -361,7 +363,7 @@ async def select_template(data: dict, session_id: str = Depends(get_session_id))
 
 
 @app.post("/api/upload-ppt")
-async def upload_ppt(file: UploadFile = File(...), session_id: str = Depends(get_session_id)):
+def upload_ppt(file: UploadFile = File(...), session_id: str = Depends(get_session_id)):
     try:
         session_upload_dir = get_session_upload_dir(session_id)
         # Keep the uploaded file's own name (sanitized) instead of a fixed
@@ -384,7 +386,7 @@ async def upload_ppt(file: UploadFile = File(...), session_id: str = Depends(get
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/process-ppt")
-async def process_ppt(payload: dict = None, session_id: str = Depends(get_session_id)):
+def process_ppt(payload: dict = None, session_id: str = Depends(get_session_id)):
     print("PROCESS_PPT payload:", payload)
     state = get_session_state(session_id)
     if not state["content_pptx"] or not state["template_style_json"]:
@@ -419,7 +421,7 @@ async def process_ppt(payload: dict = None, session_id: str = Depends(get_sessio
 
         output_path = os.path.join(session_upload_dir, styled_output_filename(state["content_pptx"]))
         # Run conversion style formatting and automatic figure insertion
-        used_figs = convert(state["content_pptx"], state["template_style_json"], output_path, apply_geometry=True, figures_metadata=figures, include_figure_captions=include_figure_captions, include_table_captions=include_table_captions)
+        used_figs, conversion_warnings = convert(state["content_pptx"], state["template_style_json"], output_path, apply_geometry=True, figures_metadata=figures, include_figure_captions=include_figure_captions, include_table_captions=include_table_captions, template_file_path=state["template_pptx"])
         state["styled_pptx"] = output_path
 
         # Resolve auto-inserted figures back to original filenames
@@ -480,7 +482,8 @@ async def process_ppt(payload: dict = None, session_id: str = Depends(get_sessio
         return {
             "ok": True, 
             "slidesInfo": slides_info, 
-            "autoInserted": state.get("auto_inserted_list", [])
+            "autoInserted": state.get("auto_inserted_list", []),
+            "warnings": conversion_warnings
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

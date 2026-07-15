@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { toast } from 'sonner';
 
 // Generate or retrieve session ID cookie
 (function getOrCreateSessionId() {
@@ -393,14 +394,18 @@ export const useStore = create<DeckforgeState>((set, get) => ({
         });
         setTimeout(() => {
           set({ isConverting: false, step: targetStep });
+          if (data.warnings && data.warnings.length > 0) {
+            toast.warning(data.warnings.join('\n'), { duration: 5000 });
+          }
         }, 500);
       } else {
         throw new Error(data.detail || 'Conversion failed');
       }
-    } catch (err) {
+    } catch (err: any) {
       clearInterval(interval);
       set({ isConverting: false, conversionProgress: 0 });
       console.error('Failed to convert deck:', err);
+      toast.error(err.message || 'Conversion failed', { duration: 5000 });
       throw err;
     }
   },

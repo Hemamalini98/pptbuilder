@@ -8,6 +8,8 @@ import json
 import re
 import sys
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import io
 import zipfile
 import shutil
@@ -1595,8 +1597,50 @@ _IMAGE_EXT_CONTENT_TYPES = {
     "emf": "image/x-emf", "wmf": "image/x-wmf", "svg": "image/svg+xml",
 }
 
+import requests
 
-def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None, figures_metadata=None, include_figure_captions=True, include_table_captions=True):
+def apply_ppt_template(
+    ppt_file_path: str,
+    template_file_path: str,
+    output_file_path: str,
+    server_url: str = None
+):
+    if server_url is None:
+        base_url = os.environ.get("APPLY_TEMPLATE_URL")
+        if not base_url:
+            raise ValueError("Template conversion not working. Please contact support team.")
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/apply-ppt-template"):
+            server_url = base_url
+        else:
+            server_url = f"{base_url}/apply-ppt-template"
+    with open(ppt_file_path, "rb") as ppt_file, open(template_file_path, "rb") as template_file:
+        files = {
+            "ppt_file": (
+                ppt_file_path.split("/")[-1],
+                ppt_file,
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ),
+            "template_file": (
+                template_file_path.split("/")[-1],
+                template_file,
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ),
+        }
+
+        response = requests.post(server_url, files=files)
+
+    if response.status_code == 200:
+        with open(output_file_path, "wb") as f:
+            f.write(response.content)
+
+        print(f"✅ PPT saved to: {output_file_path}")
+        return output_file_path
+    else:
+        raise Exception(f"API Error {response.status_code}: {response.text}")
+
+
+def convert(input_path, template_style_path, output_path, apply_geometry=True, cover_image_path=None, figures_metadata=None, include_figure_captions=True, include_table_captions=True, template_file_path=None):
     """
     Apply template styles to input.pptx and save as output.pptx.
 
@@ -1606,6 +1650,19 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
     if not os.path.exists(input_path):
         print(f"Error: input file '{input_path}' not found.")
         sys.exit(1)
+    
+    conversion_warnings = []
+    
+    if template_file_path and os.path.exists(template_file_path):
+        templated_output = input_path.replace(".pptx", "_templated.pptx")
+        print(f"Applying template via API from {template_file_path} to {input_path}")
+        try:
+            apply_ppt_template(input_path, template_file_path, templated_output)
+            input_path = templated_output
+        except Exception as e:
+            print(f"Error applying template via API: {e}")
+            raise ValueError("Template conversion not working. Please contact support team.")
+
     if not os.path.exists(template_style_path):
         print(f"Error: template style file '{template_style_path}' not found.")
         sys.exit(1)
@@ -1902,7 +1959,7 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
 
 
     print(f"\nDone. Saved to: {output_path}")
-    return used_figs
+    return used_figs, conversion_warnings
 
 
 if __name__ == "__main__":
