@@ -14,6 +14,9 @@ export const Step2Upload: React.FC = () => {
     includeTableCaptions,
     setIncludeFigureCaptions,
     setIncludeTableCaptions,
+    masterSwapMode,
+    setMasterSwapMode,
+    convertDeck,
     uploadInputPptFile,
     uploadPdfFile,
     setStep
@@ -285,20 +288,73 @@ export const Step2Upload: React.FC = () => {
       )}
 
       {!isConverting && (
-        <div className="flex justify-between items-center bg-white/60 p-4 border border-[var(--color-border)] rounded-[var(--radius-custom)]">
-          <div className="flex items-center space-x-2 text-xs text-[var(--color-muted)]">
-            <AlertCircle className="w-4 h-4" />
-            <span>
-              Using template master: <strong>{selectedTemplate ? selectedTemplate.name : "None selected"}</strong>
+        <div className="space-y-3">
+          <div className="flex items-center gap-3 bg-white/60 p-3 border border-[var(--color-border)] rounded-[var(--radius-custom)]">
+            <label className="flex items-center gap-3 cursor-pointer select-none">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={masterSwapMode}
+                onClick={() => setMasterSwapMode(!masterSwapMode)}
+                className={`relative w-10 h-5 rounded-full transition-colors duration-200 focus:outline-none ${
+                  masterSwapMode ? 'bg-[var(--color-navy)]' : 'bg-zinc-300'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${
+                    masterSwapMode ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+              <span className="text-sm font-medium text-[var(--color-navy)]">
+                Master Swap Mode
+              </span>
+            </label>
+            <span className="text-xs text-[var(--color-muted)]">
+              Rebuild deck inside the template (no PDF/figure workflow needed).
             </span>
           </div>
-          <button
-            onClick={() => setStep(3)}
-            disabled={!inputPptName || !sourcePdfName}
-            className="px-6 py-3 bg-[var(--color-navy)] hover:bg-[var(--color-navy-light)] disabled:bg-neutral-300 text-white font-semibold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md"
-          >
-            Proceed to PDF Figures
-          </button>
+          <div className="flex justify-between items-center bg-white/60 p-4 border border-[var(--color-border)] rounded-[var(--radius-custom)]">
+            <div className="flex items-center space-x-2 text-xs text-[var(--color-muted)]">
+              <AlertCircle className="w-4 h-4" />
+              <span>
+                Using template master: <strong>{selectedTemplate ? selectedTemplate.name : "None selected"}</strong>
+              </span>
+            </div>
+            {masterSwapMode ? (
+              <button
+                onClick={async () => {
+                  console.log('[master-swap] click', { inputPptName, selectedTemplate, masterSwapMode });
+                  try {
+                    await convertDeck(5);
+                    toast.success('Master swap complete');
+                  } catch (e: any) {
+                    console.error('[master-swap] convertDeck threw:', e);
+                    toast.error(`Master swap failed: ${e?.message || e}`);
+                  }
+                }}
+                disabled={!inputPptName || !selectedTemplate}
+                title={
+                  !inputPptName
+                    ? 'Upload a content PPTX first'
+                    : !selectedTemplate
+                    ? 'Select a template first'
+                    : 'Ready to convert'
+                }
+                className="px-6 py-3 bg-[var(--color-amber)] hover:bg-amber-500 disabled:bg-neutral-300 text-white font-semibold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md"
+              >
+                Run Master Swap Now
+              </button>
+            ) : (
+              <button
+                onClick={() => setStep(3)}
+                disabled={!inputPptName || !sourcePdfName}
+                className="px-6 py-3 bg-[var(--color-navy)] hover:bg-[var(--color-navy-light)] disabled:bg-neutral-300 text-white font-semibold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md"
+              >
+                Proceed to PDF Figures
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

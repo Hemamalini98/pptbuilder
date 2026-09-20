@@ -377,7 +377,26 @@ async def process_ppt(payload: dict = None, session_id: str = Depends(get_sessio
     state = get_session_state(session_id)
     if not state["content_pptx"] or not state["template_style_json"]:
         raise HTTPException(status_code=400, detail="Missing uploaded PPTX or Template style JSON")
-    
+
+    mode = (payload or {}).get("mode", "restyle")
+    if mode == "master_swap":
+        # Master-swap mode: rebuild the input deck inside a fresh copy of the
+        # template so the output inherits the template's master + layouts +
+        # theme. Ignores the PDF-figure workflow entirely.
+        from master_swap import apply_template
+        session_upload_dir = get_session_upload_dir(session_id)
+        output_path = os.path.join(session_upload_dir, "styled_output.pptx")
+        try:
+            apply_template(
+                state["content_pptx"], state["template_pptx"], output_path
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"master_swap failed: {e}")
+        state["styled_pptx"] = output_path
+        state["auto_inserted_list"] = []
+        slides_info = extract_template(output_path)
+        return {"ok": True, "slidesInfo": slides_info, "autoInserted": []}
+
     try:
         session_upload_dir = get_session_upload_dir(session_id)
         # Recreate pdf_extracts folder
