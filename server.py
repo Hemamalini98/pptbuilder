@@ -299,19 +299,33 @@ async def upload_template(file: UploadFile = File(...), session_id: str = Depend
         path = os.path.join(TEMPLATES_DIR, filename)
         with open(path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
+
+        # Auto-repair the template on upload so downstream extraction /
+        # conversion sees a clean file (adds missing <p:ph> idx/type,
+        # creationId GUIDs, etc.).
+        from template_repair import repair_template
+        repair_report = repair_template(path)
+
         state = get_session_state(session_id)
         state["template_pptx"] = path
-        
+
         # Extract styles using main.py logic
         styles = extract_template(path)
         style_json_filename = os.path.splitext(filename)[0] + "_styles.json"
         style_json_path = os.path.join(TEMPLATES_DIR, style_json_filename)
         with open(style_json_path, "w") as f:
             json.dump(styles, f, indent=2)
-            
+
         state["template_style_json"] = style_json_path
-        return {"ok": True, "styles": styles, "filename": filename}
+        return {
+            "ok": True,
+            "styles": styles,
+            "filename": filename,
+            "repair": {
+                "count": repair_report.count,
+                "fixes": repair_report.fixes,
+            },
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

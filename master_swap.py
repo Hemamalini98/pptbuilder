@@ -4,7 +4,9 @@ Rebuilds an input deck inside a fresh copy of a template so the output inherits
 the template's slide master, layouts, and theme (unlike convert.py which
 restyles shapes in place and keeps the input's master).
 
-Selection of a template layout per input slide is driven by rules_default.json.
+Layout selection is driven by scoring every template layout against the
+source slide's placeholder signature — no hardcoded layout names, so the
+same code works with any uploaded template.
 
 Contract:
     apply_template(input_path, template_path, output_path, rules_path=None) -> Path
@@ -203,58 +205,213 @@ def analyze_input_slide(slide: Slide, idx: int) -> SlideSignature:
 
 
 # ---------------------------------------------------------------------------
-# Rule engine
+# Generic layout matcher
+#
+# Instead of hardcoding rules by template layout name (which only work for
+# one specific template), we score every template layout against the input
+# slide's placeholder signature and pick the best-scoring one. This means
+# the same code path works whether the uploaded template is NASM, Wolters
+# Kluwer, or anything else — the template is the source of truth.
 # ---------------------------------------------------------------------------
 
-def _rule_matches(when: dict, sig: SlideSignature) -> bool:
-    for key, expected in when.items():
-        if key == "input_layout":
-            if sig.input_layout_name != expected:
-                return False
-        elif key == "title_is_upper":
-            if sig.title_is_upper != expected:
-                return False
-        elif key == "has_figure_marker":
-            if sig.has_figure_marker != expected:
-                return False
-        elif key == "body_line_count_lte":
-            if sig.body_line_count > expected:
-                return False
-        elif key == "body_line_count_gte":
-            if sig.body_line_count < expected:
-                return False
-        elif key == "subheading_hits_gte":
-            if sig.subheading_hits < expected:
-                return False
-        elif key == "image_count_gte":
-            if sig.image_count < expected:
-                return False
-        else:
-            raise ValueError(f"unknown rule term {key!r}")
+# Placeholder-type categories the matcher reasons about. Every template
+# placeholder collapses into one of these, ignoring exact type strings
+# so we can compare "OBJECT" ↔ "BODY" ↔ "TEXT" as equivalent body slots.
+_CAT_TITLE = "title"
+_CAT_BODY = "body"
+_CAT_PICTURE = "picture"
+_CAT_CHART = "chart"
+_CAT_TABLE = "table"
+_CAT_FOOTER = "footer"
+_CAT_SLIDE_NUMBER = "sldnum"
+_CAT_OTHER = "other"
+
+
+def _categorize_placeholder_type(type_str: str) -> str:
+    """Map a placeholder type string to a category for signature matching."""
+    t = (type_str or "").upper()
+    if "TITLE" in t:
+        return _CAT_TITLE
+    if any(k in t for k in ("BODY", "OBJECT", "SUBTITLE", "TEXT")):
+        return _CAT_BODY
+    if "PICTURE" in t or "MEDIA" in t or "CLIP_ART" in t:
+        return _CAT_PICTURE
+    if "CHART" in t:
+        return _CAT_CHART
+    if "TABLE" in t:
+        return _CAT_TABLE
+    if "FOOTER" in t:
+        return _CAT_FOOTER
+    if "SLIDE_NUMBER" in t or "SLIDENUM" in t:
+        return _CAT_SLIDE_NUMBER
+    return _CAT_OTHER
+
+
+def _layout_placeholder_categories(layout) -> list[str]:
+    """Return the categories of a template layout's placeholders."""
+    cats: list[str] = []
+    for ph in layout.placeholders:
+        try:
+            cats.append(_categorize_placeholder_type(str(ph.placeholder_format.type)))
+        except Exception:
+            continue
+    return cats
+
+
+def _layout_body_area_ratio(layout) -> float:
+    """Return the fraction of the slide occupied by body-type placeholders.
+
+    Content layouts (`1 Column`, `2 Column`, `Content`) devote most of
+    the slide to body area. Title-slide / cover layouts (`Title Slide`,
+    `1_Title`) have a small subtitle instead. Used to distinguish them
+    when both look identical by category count.
+    """
+    try:
+        prs = layout.part.package.presentation_part.presentation
+        slide_area = prs.slide_width * prs.slide_height
+    except Exception:
+        return 0.0
+    if not slide_area:
+        return 0.0
+    body_area = 0
+    for ph in layout.placeholders:
+        try:
+            cat = _categorize_placeholder_type(str(ph.placeholder_format.type))
+        except Exception:
+            continue
+        if cat not in (_CAT_BODY, _CAT_PICTURE, _CAT_CHART, _CAT_TABLE):
+            continue
+        if ph.width and ph.height:
+            body_area += int(ph.width) * int(ph.height)
+    return body_area / slide_area
+
+
+def _layout_title_at_top(layout) -> bool:
+    """True when the layout's title placeholder is in the upper third.
+
+    Content layouts put the title near the top; cover/intro layouts
+    place it lower on the slide.
+    """
+    try:
+        prs = layout.part.package.presentation_part.presentation
+        slide_h = prs.slide_height
+    except Exception:
+        return True
+    for ph in layout.placeholders:
+        try:
+            if "TITLE" not in str(ph.placeholder_format.type):
+                continue
+        except Exception:
+            continue
+        if ph.top is None:
+            return True
+        return ph.top < slide_h * 0.33
     return True
 
 
-def _pick_layouts(rules: dict, sig: SlideSignature) -> list[str]:
-    for rule in rules.get("rules", []):
-        if _rule_matches(rule.get("when", {}), sig):
-            action = rule.get("action")
-            if action == "single":
-                return [rule["layout"]]
-            if action == "split_title_slide":
-                return list(rule["layouts"])
-            raise ValueError(f"unknown action {action!r}")
-    raise LookupError(
-        f"no rule matched input slide {sig.idx}: layout={sig.input_layout_name!r}"
-    )
+def _score_layout_for_source(
+    layout,
+    source_cats: list[str],
+    *,
+    prefer_dark_bg: bool = False,
+    prefer_content_layout: bool = True,
+) -> int:
+    """Score how well `layout` fits a source slide with `source_cats`.
+
+    Higher is better. Ignores footer/slide-number placeholders (every
+    layout has them; they're irrelevant to structural matching).
+    """
+    layout_cats = [
+        c for c in _layout_placeholder_categories(layout)
+        if c not in (_CAT_FOOTER, _CAT_SLIDE_NUMBER)
+    ]
+    source_relevant = [
+        c for c in source_cats
+        if c not in (_CAT_FOOTER, _CAT_SLIDE_NUMBER)
+    ]
+
+    score = 0
+    from collections import Counter
+    lc = Counter(layout_cats)
+    sc = Counter(source_relevant)
+
+    # Match each source category against layout's supply. Give bigger
+    # weight to structural roles (title/body) than to accessories.
+    weights = {
+        _CAT_TITLE: 20,
+        _CAT_BODY: 12,
+        _CAT_PICTURE: 8,
+        _CAT_CHART: 8,
+        _CAT_TABLE: 6,
+        _CAT_OTHER: 2,
+    }
+    for cat, count in sc.items():
+        provided = lc.get(cat, 0)
+        matched = min(count, provided)
+        score += weights.get(cat, 1) * matched
+
+    # Penalise mismatched surplus body slots — a source with one body
+    # doesn't belong on a 3-column layout when a 1-column exists.
+    surplus_body = max(0, lc.get(_CAT_BODY, 0) - sc.get(_CAT_BODY, 0))
+    score -= 3 * surplus_body
+
+    # Prefer layouts that match dark-background preference (for section
+    # headers whose title is all-caps).
+    if prefer_dark_bg and _layout_has_dark_bg(layout):
+        score += 10
+    elif not prefer_dark_bg and _layout_has_dark_bg(layout):
+        score -= 5
+
+    # Tie-breaker: prefer content-flavored layouts (title near top,
+    # large body area) when the source has body content. Distinguishes
+    # `1 Column` from `1_Title` etc. — both have title+body, but
+    # `1 Column` devotes 55% of the slide to body while `1_Title` only
+    # has a small subtitle.
+    if prefer_content_layout and _CAT_BODY in source_relevant:
+        if _layout_title_at_top(layout):
+            score += 6
+        body_ratio = _layout_body_area_ratio(layout)
+        # Scale so a full-body layout adds ~6, a title-subtitle adds ~1
+        score += int(body_ratio * 12)
+
+    return score
 
 
-def _layout_by_name(prs, name: str) -> SlideLayout:
-    for L in prs.slide_layouts:
-        if L.name == name:
-            return L
-    raise LookupError(
-        f"template has no layout named {name!r}; available: {[L.name for L in prs.slide_layouts]}"
-    )
+def _pick_layout_for_slide(prs, sig: SlideSignature):
+    """Score every template layout for the source slide and pick the best.
+
+    Purely signature-driven — no hardcoded layout names. Works with any
+    template the user uploads.
+    """
+    # Source placeholder categories:
+    source_cats: list[str] = []
+    if sig.title:
+        source_cats.append(_CAT_TITLE)
+    if sig.body_paragraphs:
+        source_cats.append(_CAT_BODY)
+    if sig.image_count > 0 or sig.has_figure_marker:
+        source_cats.append(_CAT_PICTURE)
+
+    # ALL-CAPS titles usually indicate a section header — bias toward
+    # dark-background layouts when the template offers them.
+    prefer_dark = sig.title_is_upper
+    # Prefer content-flavored layouts unless the source is essentially
+    # empty (just a title, no body — that's a real cover slide).
+    prefer_content = bool(sig.body_paragraphs)
+
+    best_layout = None
+    best_score = None
+    for layout in prs.slide_layouts:
+        score = _score_layout_for_source(
+            layout,
+            source_cats,
+            prefer_dark_bg=prefer_dark,
+            prefer_content_layout=prefer_content,
+        )
+        if best_score is None or score > best_score:
+            best_score = score
+            best_layout = layout
+    return best_layout
 
 
 # ---------------------------------------------------------------------------
@@ -323,22 +480,68 @@ def _enable_autofit(
         autofit.set("lnSpcReduction", str(int(ln_spc_reduction_pct) * 1000))
 
 
-def _title_font_scale_pct(text: str) -> int | None:
-    """Pick a fontScale% for a title based on character count.
+def _title_font_scale_pct(text: str, layout=None) -> int | None:
+    """Pick a fontScale% for a title based on how much room the layout has.
 
-    Master title defRPr is 40pt Archivo Black (all-caps). Long strings
-    overflow a 12.5"-wide title placeholder even at zero padding. These
-    thresholds match what the human's manual work produces when saving
-    long titles that don't fit at 40pt.
+    Uses the layout's title placeholder width and the master's title
+    defRPr size to estimate whether the title needs to shrink to fit on
+    one line. Purely template-driven: whatever font the master defines
+    at whatever size, the estimate adapts.
+
+    Returns None when no shrink is needed. Returns 60-95 when we need
+    PowerPoint to render smaller at load time (the empty `<a:normAutofit/>`
+    doesn't reliably trigger during headless export).
     """
-    n = len(text or "")
-    if n <= 25:
-        return None       # fits at 40pt, no shrink
-    if n <= 35:
-        return 85         # ~34pt
-    if n <= 45:
-        return 70         # ~28pt (matches expected slide 6's rendered size)
-    return 60             # ~24pt for very long titles
+    if not text or layout is None:
+        return None
+    # Locate the layout's title placeholder to read its width.
+    title_width_emu = None
+    for ph in layout.placeholders:
+        try:
+            if "TITLE" in str(ph.placeholder_format.type):
+                title_width_emu = ph.width
+                break
+        except Exception:
+            continue
+    if title_width_emu is None or title_width_emu <= 0:
+        return None
+    title_width_in = title_width_emu / 914400
+
+    # Read the master's title defRPr size (defaults to 40pt if unspecified).
+    try:
+        prs_part = layout.part.package.presentation_part
+        prs = prs_part.presentation
+    except Exception:
+        prs = None
+    title_size_pt = 40.0
+    if prs is not None:
+        for master in prs.slide_masters:
+            try:
+                txStyles = master.element.find(qn("p:txStyles"))
+                titleStyle = txStyles.find(qn("p:titleStyle")) if txStyles is not None else None
+                if titleStyle is None:
+                    continue
+                lvl1 = titleStyle.find(qn("a:lvl1pPr"))
+                defRPr = lvl1.find(qn("a:defRPr")) if lvl1 is not None else None
+                sz = defRPr.get("sz") if defRPr is not None else None
+                if sz:
+                    title_size_pt = float(sz) / 100.0
+                break
+            except Exception:
+                continue
+
+    # Rough char-width factor for a heavy display font (bold caps ~0.65em).
+    approx_char_pt = title_size_pt * 0.65
+    text_width_pt = len(text) * approx_char_pt
+    available_pt = title_width_in * 72
+
+    if text_width_pt <= available_pt:
+        return None  # fits at native size
+
+    scale = available_pt / text_width_pt
+    pct = int(round(scale * 100))
+    # Clamp so we don't shrink into unreadable territory.
+    return max(50, min(95, pct))
 
 
 def _layout_has_dark_bg(layout) -> bool:
@@ -369,27 +572,28 @@ def _set_placeholder_text(
     size_pt: float | None = None,
     is_title: bool = False,
     title_color_scheme: str | None = None,
+    layout=None,
 ) -> None:
     """Write a single line of text into a placeholder.
 
     - `autofit=True` forces `<a:normAutofit/>` so PowerPoint shrinks the
       text if it overflows.
     - `size_pt` emits an explicit `sz` on the run.
-    - `is_title=True` applies the template's title conventions: zeroes the
-      body-frame insets so long titles have room to fit or shrink.
-    - `title_color_scheme` picks the schemeClr for title runs:
-      * `"tx2"` (default for light layouts) — resolves to dk2 (dark navy)
-        via the master's color map.
-      * `"tx1"` — resolves to lt1 (white) on layouts whose
-        `overrideClrMapping` swaps text/background (MidnightSky variants).
+    - `is_title=True` applies the template's title conventions: zeroes
+      insets and, when `layout` is given, computes a fontScale from the
+      layout's title-placeholder width vs. the master's title-size so
+      long titles fit without hardcoding thresholds.
+    - `title_color_scheme` picks the schemeClr for title runs — chosen
+      by the caller based on the target layout's color map.
     """
     _clear_placeholder_text(ph)
     txBody = ph.text_frame._txBody
     if autofit:
-        font_scale = _title_font_scale_pct(text) if is_title else None
-        # Do NOT combine lnSpcReduction with the master's already-tight 72%
-        # line spacing — the two multiply and cause wrapped title lines to
-        # visually overlap. fontScale alone gives the shrink we need.
+        font_scale = (
+            _title_font_scale_pct(text, layout=layout) if is_title else None
+        )
+        # No lnSpcReduction — multiplying with a tight master lnSpc causes
+        # wrapped title lines to visually overlap.
         _enable_autofit(
             txBody,
             zero_insets=is_title,
@@ -411,35 +615,139 @@ def _set_placeholder_text(
         t.text = text
 
 
-def _apply_bullet(pPr, level: int, *, style: str = "dot") -> None:
-    """Emit a standard bullet on a pPr element.
+@dataclass
+class BulletDefinition:
+    """A bullet inferred from the template (or a generic fallback)."""
 
-    Required because the NASM template master defines `<a:buNone/>` at every
-    body level, so paragraphs inherit "no bullet" unless we override.
-    marL / indent (0.375") produce PowerPoint's default hanging bullet.
-    Level shifts the margin so nested bullets indent visibly.
+    char: str
+    font: str
+    marL: int  # left margin at level 0, EMU
+    indent: int  # first-line indent (usually negative for hanging)
+    panose: str | None = None
+    pitchFamily: str | None = None
+    charset: str | None = None
 
-    style="dot" → Arial round bullet `•`  (used by 2-column and image layouts)
-    style="wing" → Wingdings section symbol `§` (used by 1-column layouts)
+
+# PowerPoint's default fallback bullet — used when the template's master
+# and layout neither define a bullet nor inherit one. Kept as a *fallback*,
+# not a hardcoded default: `_infer_bullet_from_template` is consulted first.
+_DEFAULT_BULLET = BulletDefinition(
+    char="•",
+    font="Arial",
+    marL=342900,
+    indent=-342900,
+    panose="020B0604020202020204",
+    pitchFamily="34",
+    charset="0",
+)
+
+
+def _infer_bullet_from_layout(layout, level: int = 0) -> BulletDefinition | None:
+    """Read the level-N bullet from the layout's ph12 lstStyle if present.
+
+    Only returns a bullet if the layout's placeholder explicitly defines
+    one (buChar). Layouts that inherit `<a:buNone/>` from the master
+    return None — the caller then decides whether to force a default.
     """
-    base_marL = 342900  # 0.375" — PowerPoint's standard hanging bullet indent
-    per_level_step = 342900
-    pPr.set("marL", str(base_marL + level * per_level_step))
-    pPr.set("indent", "-342900")
+    for ph in layout.placeholders:
+        try:
+            fmt_idx = ph.placeholder_format.idx
+        except Exception:
+            continue
+        if fmt_idx not in (12, 15, 1, 2):
+            continue  # not a body-ish placeholder
+        try:
+            txBody = ph._element.find(qn("p:txBody"))
+        except Exception:
+            continue
+        if txBody is None:
+            continue
+        lstStyle = txBody.find(qn("a:lstStyle"))
+        if lstStyle is None:
+            continue
+        lvl_tag = f"a:lvl{level + 1}pPr"
+        lvl = lstStyle.find(qn(lvl_tag))
+        if lvl is None:
+            continue
+        buChar = lvl.find(qn("a:buChar"))
+        if buChar is None:
+            continue
+        buFont = lvl.find(qn("a:buFont"))
+        marL = int(lvl.get("marL", 342900))
+        indent = int(lvl.get("indent", -342900))
+        return BulletDefinition(
+            char=buChar.get("char", "•"),
+            font=buFont.get("typeface", "Arial") if buFont is not None else "Arial",
+            marL=marL,
+            indent=indent,
+            panose=buFont.get("panose") if buFont is not None else None,
+            pitchFamily=buFont.get("pitchFamily") if buFont is not None else None,
+            charset=buFont.get("charset") if buFont is not None else None,
+        )
+    return None
+
+
+def _infer_bullet_from_master(prs, level: int = 0) -> BulletDefinition | None:
+    """Read the level-N body bullet from the master's txStyles bodyStyle."""
+    for master in prs.slide_masters:
+        try:
+            txStyles = master.element.find(qn("p:txStyles"))
+        except Exception:
+            continue
+        if txStyles is None:
+            continue
+        bodyStyle = txStyles.find(qn("p:bodyStyle"))
+        if bodyStyle is None:
+            continue
+        lvl = bodyStyle.find(qn(f"a:lvl{level + 1}pPr"))
+        if lvl is None:
+            continue
+        buChar = lvl.find(qn("a:buChar"))
+        if buChar is None:
+            continue
+        buFont = lvl.find(qn("a:buFont"))
+        marL = int(lvl.get("marL", 342900)) or 342900
+        indent = int(lvl.get("indent", -342900)) or -342900
+        return BulletDefinition(
+            char=buChar.get("char", "•"),
+            font=buFont.get("typeface", "Arial") if buFont is not None else "Arial",
+            marL=marL,
+            indent=indent,
+            panose=buFont.get("panose") if buFont is not None else None,
+            pitchFamily=buFont.get("pitchFamily") if buFont is not None else None,
+            charset=buFont.get("charset") if buFont is not None else None,
+        )
+    return None
+
+
+def _pick_bullet_for_slide(prs, layout, level: int = 0) -> BulletDefinition:
+    """Pick the bullet definition to emit for a given layout + level.
+
+    Tries in order: layout's own placeholder lstStyle → master's bodyStyle
+    → generic Arial `•` fallback. This is fully template-driven: change
+    the template and the bullet changes automatically.
+    """
+    return (
+        _infer_bullet_from_layout(layout, level)
+        or _infer_bullet_from_master(prs, level)
+        or _DEFAULT_BULLET
+    )
+
+
+def _apply_bullet(pPr, level: int, bullet: BulletDefinition) -> None:
+    """Emit a bullet on a pPr element using the given definition."""
+    pPr.set("marL", str(bullet.marL + level * abs(bullet.marL)))
+    pPr.set("indent", str(bullet.indent))
     buFont = etree.SubElement(pPr, qn("a:buFont"))
+    buFont.set("typeface", bullet.font)
+    if bullet.panose:
+        buFont.set("panose", bullet.panose)
+    if bullet.pitchFamily:
+        buFont.set("pitchFamily", bullet.pitchFamily)
+    if bullet.charset:
+        buFont.set("charset", bullet.charset)
     buChar = etree.SubElement(pPr, qn("a:buChar"))
-    if style == "wing":
-        buFont.set("typeface", "Wingdings")
-        buFont.set("panose", "05000000000000000000")
-        buFont.set("pitchFamily", "2")
-        buFont.set("charset", "2")
-        buChar.set("char", "§")
-    else:
-        buFont.set("typeface", "Arial")
-        buFont.set("panose", "020B0604020202020204")
-        buFont.set("pitchFamily", "34")
-        buFont.set("charset", "0")
-        buChar.set("char", "•")
+    buChar.set("char", bullet.char)
 
 
 def _write_run(p_elem, run: dict, *, force_body_color: bool = False) -> None:
@@ -498,16 +806,17 @@ def _write_paragraphs(
     paragraphs: Iterable[dict],
     *,
     is_body: bool = True,
-    bullet_style: str = "dot",
+    bullet: "BulletDefinition | None" = None,
 ) -> None:
     """Write captured paragraphs into a placeholder.
 
-    Each paragraph is: {level, has_no_bullet, runs: [{text, size_pt, bold, ...}, ...]}
-    When `is_body` is True, emits a bullet on every paragraph unless the
-    input paragraph explicitly declared `<a:buNone/>`, forces the template's
-    tx1 body color on runs without an explicit color, and enables
-    `<a:normAutofit/>` + `anchor="ctr"` so text shrinks and centers within
-    the placeholder — matching how expected slides handle body content.
+    Each paragraph: {level, has_no_bullet, runs: [{text, bold, italic, ...}]}
+    When `is_body` is True, emits `<a:normAutofit/>` + `anchor="ctr"` so
+    body text shrinks and centers, and emits a bullet on every paragraph
+    (unless the input declared `<a:buNone/>`) using the supplied
+    `BulletDefinition`. The bullet definition is inferred from the target
+    template, so different templates yield different bullet styles
+    automatically.
     """
     _clear_placeholder_text(ph)
     txBody = ph.text_frame._txBody
@@ -524,11 +833,12 @@ def _write_paragraphs(
             pPr.set("lvl", str(level))
         want_bullet = (
             is_body
+            and bullet is not None
             and not para.get("has_no_bullet", False)
             and any(r.get("text", "").strip() for r in para.get("runs", []))
         )
         if want_bullet:
-            _apply_bullet(pPr, level, style=bullet_style)
+            _apply_bullet(pPr, level, bullet)
         # If we set nothing on pPr, drop it so PowerPoint uses layout defaults.
         if not pPr.attrib and len(pPr) == 0:
             p.remove(pPr)
@@ -663,30 +973,6 @@ def _copy_notes(new_slide: Slide, notes_text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Title-slide split (JBL chapter cover convention)
-# ---------------------------------------------------------------------------
-
-def _extract_cover_parts(sig: SlideSignature) -> tuple[str, str, str]:
-    """From a Title-Slide input, produce (book_title, chapter_line, part_title).
-
-    JBL convention: input title = book title, body[0] = 'Chapter N', body[1] = PART TITLE.
-    Falls back gracefully if the structure differs.
-    """
-    book_title = sig.title
-    chapter_line = ""
-    part_title = ""
-    body_lines = [_para_text(p).strip() for p in sig.body_paragraphs if _para_text(p).strip()]
-    for line in body_lines:
-        if re.match(r"^chapter\s+\d+", line, re.IGNORECASE):
-            chapter_line = line
-        elif line == line.upper() and len(line) > 3:
-            part_title = line
-    if not part_title and body_lines:
-        part_title = body_lines[-1]
-    return book_title, chapter_line, part_title
-
-
-# ---------------------------------------------------------------------------
 # Main entrypoint
 # ---------------------------------------------------------------------------
 
@@ -694,20 +980,29 @@ def apply_template(
     input_path: str | Path,
     template_path: str | Path,
     output_path: str | Path,
-    rules_path: str | Path | None = None,
+    rules_path: str | Path | None = None,  # deprecated — kept for API compat
 ) -> tuple[Path, list[dict]]:
     """Rebuild the input deck inside a fresh copy of the template.
 
-    Returns (output_path, report) where report is a per-slide record of the
-    layout chosen and rule that matched.
+    Fully template-driven — no layout-name hardcoding. For each source slide
+    we score every template layout against the source's placeholder
+    signature (title/body/picture) and pick the highest scorer.
+
+    Returns (output_path, report). `rules_path` is ignored and only kept
+    to avoid breaking existing callers.
     """
     input_path = Path(input_path)
     template_path = Path(template_path)
     output_path = Path(output_path)
-    if rules_path is None:
-        rules_path = Path(__file__).parent / "rules_default.json"
-    rules = json.loads(Path(rules_path).read_text())
-    overrides = {int(k): v for k, v in rules.get("overrides_by_output_index", {}).items() if k.isdigit()}
+
+    # Auto-repair the template first so downstream picks / add_slide see
+    # a well-formed file (missing <p:ph> idx/type, creationId GUIDs).
+    try:
+        from template_repair import repair_template
+        repair_template(template_path)
+    except Exception:
+        # Repair failure is non-fatal — proceed with the template as-is.
+        pass
 
     input_prs = Presentation(str(input_path))
     input_slides = list(input_prs.slides)
@@ -721,35 +1016,17 @@ def apply_template(
 
     for i, in_slide in enumerate(input_slides, start=1):
         sig = analyze_input_slide(in_slide, i)
-        layout_names = _pick_layouts(rules, sig)
-
-        if len(layout_names) == 2 and sig.input_layout_name == "Title Slide":
-            book_title, chapter_line, part_title = _extract_cover_parts(sig)
-
-            layout1 = _layout_by_name(output_prs, layout_names[0])
-            s1 = output_prs.slides.add_slide(layout1)
-            output_slide_counter += 1
-            _emit_report(report, output_slide_counter, i, sig, layout_names[0], "split[0]")
-            _fill_cover_slide(s1, book_title, chapter_line, sig.title_size_pt)
-
-            layout2 = _layout_by_name(output_prs, layout_names[1])
-            s2 = output_prs.slides.add_slide(layout2)
-            output_slide_counter += 1
-            _emit_report(report, output_slide_counter, i, sig, layout_names[1], "split[1]")
-            _fill_cover_slide(s2, part_title, chapter_line, sig.title_size_pt)
+        layout = _pick_layout_for_slide(output_prs, sig)
+        if layout is None:
+            # Template has no layouts at all — degenerate case.
             continue
 
-        layout_name = layout_names[0]
-        # Apply per-slide override if configured (matches on the *next* output index)
-        prospective_idx = output_slide_counter + 1
-        if prospective_idx in overrides:
-            layout_name = overrides[prospective_idx]
-
-        layout = _layout_by_name(output_prs, layout_name)
         new_slide = output_prs.slides.add_slide(layout)
         output_slide_counter += 1
-        _emit_report(report, output_slide_counter, i, sig, layout_name, "rule" if prospective_idx not in overrides else "override")
-        _fill_body_slide(new_slide, sig, layout_name)
+        _emit_report(
+            report, output_slide_counter, i, sig, layout.name, "signature-match"
+        )
+        _fill_body_slide(new_slide, sig, layout.name)
 
     output_prs.save(str(output_path))
     return output_path, report
@@ -783,39 +1060,6 @@ def _remove_placeholder(slide: Slide, ph) -> None:
         pass
 
 
-def _fill_cover_slide(slide: Slide, main_text: str, chapter_line: str, title_size_pt: float | None = None) -> None:
-    title_ph = _find_title_placeholder(slide)
-    if title_ph is not None:
-        color = "tx1" if _layout_has_dark_bg(slide.slide_layout) else "tx2"
-        _set_placeholder_text(
-            title_ph, main_text,
-            autofit=True, is_title=True, title_color_scheme=color,
-        )
-    bodies = _find_body_placeholders(slide)
-    if bodies and chapter_line:
-        _set_placeholder_text(bodies[0], chapter_line)
-    # Drop any body placeholder we didn't populate so PowerPoint's "Click to
-    # add text" prompt doesn't appear in the exported deck.
-    filled = {bodies[0]._element} if (bodies and chapter_line) else set()
-    for ph in bodies:
-        if ph._element not in filled:
-            _remove_placeholder(slide, ph)
-
-
-def _bullet_style_for_layout(layout_name: str) -> str:
-    """Pick the bullet character to match the human's expected output.
-
-    2-column and image-flavored layouts use Arial `•`; 1-column layouts
-    (and their MidnightSky variants) use Wingdings `§`. Rule derived from
-    the expected file's per-slide bullet definitions.
-    """
-    if "2 Column" in layout_name or "3 Column" in layout_name:
-        return "dot"
-    if "Image" in layout_name:
-        return "dot"
-    return "wing"
-
-
 def _add_loose_textbox(slide: Slide, paragraphs: list[dict], layout: SlideLayout) -> None:
     """Place standalone TextBox paragraphs (quotes/callouts) into their own
     non-placeholder TextBox on the output slide.
@@ -842,7 +1086,7 @@ def _add_loose_textbox(slide: Slide, paragraphs: list[dict], layout: SlideLayout
     # Reuse _write_paragraphs to preserve per-run styling; no bullet.
     for para in paragraphs:
         para["has_no_bullet"] = True
-    _write_paragraphs(tb, paragraphs, is_body=True, bullet_style="dot")
+    _write_paragraphs(tb, paragraphs, is_body=True, bullet=None)
 
 
 def _copy_geometry_from_layout(slide_ph, layout) -> None:
@@ -887,26 +1131,30 @@ def _fill_body_slide(slide: Slide, sig: SlideSignature, layout_name: str) -> Non
         _set_placeholder_text(
             title_ph, sig.title,
             autofit=True, is_title=True, title_color_scheme=color,
+            layout=slide.slide_layout,
         )
 
     # Peel off figure/table markers so they land in a dedicated red TextBox
     # instead of being lumped into the body placeholder.
     content_paras, marker_paras = _split_out_figure_markers(sig.body_paragraphs)
 
-    bullet_style = _bullet_style_for_layout(layout_name)
+    # Bullet definition is inferred from the *target template* (its
+    # layout ph lstStyle, else the master's bodyStyle, else a generic
+    # PowerPoint default). Uploading a different template automatically
+    # yields different bullets — no hardcoding required.
+    prs = slide.part.package.presentation_part.presentation
+    bullet = _pick_bullet_for_slide(prs, slide.slide_layout, level=0)
 
     bodies = _find_body_placeholders(slide)
     filled_body: set = set()
     if bodies and content_paras:
-        # All real body content goes into the primary body placeholder (ph12).
-        # For "2 Column" and "1 Column + Image" layouts, ph15 is intentionally
-        # left empty — that region is reserved for a figure/table (rendered
-        # either as the image itself or as the red marker TextBox emitted
-        # below). Splitting bullets across ph12/ph15 is not the convention
-        # this template uses.
-        _write_paragraphs(bodies[0], content_paras, bullet_style=bullet_style)
-        # Give ph12 an explicit xfrm so PowerPoint's normAutofit measures the
-        # exact box; matches the expected file's structure.
+        # Primary body content goes into the first body placeholder. Any
+        # secondary body placeholders (e.g. a right column) are dropped
+        # unless the source deck has content for them — the template
+        # decides how many columns exist; we don't over-fill.
+        _write_paragraphs(bodies[0], content_paras, bullet=bullet)
+        # Give the placeholder an explicit xfrm so PowerPoint's
+        # normAutofit measures the exact box.
         _copy_geometry_from_layout(bodies[0], slide.slide_layout)
         filled_body.add(bodies[0]._element)
 

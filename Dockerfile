@@ -22,6 +22,7 @@ COPY server.py .
 COPY customers.json .
 COPY master_swap.py .
 COPY rules_default.json .
+COPY template_repair.py .
 
 # Create uploads directory
 RUN mkdir -p uploads
