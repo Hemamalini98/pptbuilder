@@ -1397,28 +1397,35 @@ def _clone_source_content_shapes(source_slide, target_slide) -> None:
     except Exception:
         return
     for sh in source_slide.shapes:
+        # Route by the underlying element tag rather than is_placeholder:
+        # source decks commonly wrap tables and pictures inside a content
+        # placeholder (a graphicFrame or pic with a `<p:ph>` inside), which
+        # python-pptx surfaces as `is_placeholder=True`. Those still need
+        # to be cloned as content — the placeholder wrapper is incidental.
         try:
-            if sh.is_placeholder:
-                continue
+            tag = sh._element.tag.split("}")[-1]
         except Exception:
             continue
+        # Skip pure text placeholders (title/body) — handled by fill loop.
+        if tag == "sp":
+            continue
         # Table
-        if getattr(sh, "has_table", False):
+        if tag == "graphicFrame" and getattr(sh, "has_table", False):
             try:
                 target_spTree.append(deepcopy(sh._element))
             except Exception:
                 pass
             continue
         # Picture: extract blob and re-insert on the target slide.
+        is_picture = False
         try:
-            is_picture = sh.shape_type == MSO_SHAPE_TYPE.PICTURE
+            is_picture = (tag == "pic") or sh.shape_type == MSO_SHAPE_TYPE.PICTURE
         except Exception:
-            is_picture = False
+            pass
         if is_picture:
             try:
                 image = sh.image
                 blob = image.blob
-                ext = image.ext or "png"
             except Exception:
                 continue
             import io
