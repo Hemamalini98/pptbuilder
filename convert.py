@@ -1621,10 +1621,25 @@ def convert(input_path, template_style_path, output_path, apply_geometry=True, c
             # Subtitle also must not inherit bullet styling from layout lstStyle
             is_title_or_subtitle = is_title or "SUBTITLE" in ph_type
 
-            # If layout is comparison (slideLayout5) and the slide only has a single body content placeholder
-            # at idx 1 (idx 2 is missing), remap idx 1 to 2 so it styles as body content, not column title.
-            if layout_name == "slideLayout5" and ph_idx == 1 and 2 not in present_indices:
-                ph_idx = 2
+            # Comparison-style layouts pair a column-title placeholder at idx 1
+            # with a body placeholder at idx 2. If the slide only carries idx 1
+            # and its body text, restyle it as idx 2 so it inherits body styling
+            # instead of column-title styling. Detected structurally from the
+            # layout's own placeholder types — no layout-name hardcoding.
+            if ph_idx == 1 and 2 not in present_indices:
+                _layout_phs = _layout_for_slide.get("placeholders", []) if _layout_for_slide else []
+                _ph1_type = next(
+                    (p.get("placeholder", {}).get("type", "") for p in _layout_phs
+                     if p.get("placeholder", {}).get("idx") == 1),
+                    "",
+                )
+                _ph2_type = next(
+                    (p.get("placeholder", {}).get("type", "") for p in _layout_phs
+                     if p.get("placeholder", {}).get("idx") == 2),
+                    "",
+                )
+                if "TITLE" in _ph1_type and any(k in _ph2_type for k in ("BODY", "OBJECT", "TEXT")):
+                    ph_idx = 2
 
             layout_ph   = get_layout_ph(template, layout_name, ph_idx)
             master_sh   = get_master_shape(template, ph_idx)

@@ -1,0 +1,38 @@
+{
+  "description": "Layout preferences for Template.pptx (S4C reference deck). Rules bias the Master Swap picker toward layout choices this template's designer prefers; typography overrides pin body text size when the master default differs from the template's intended size; cover_chapter_divider synthesizes an extra chapter-divider slide from decorative text found on a source cover slide. The generic structural scorer remains authoritative when no rule matches, and templates without a preferences file inherit master typography as normal and produce a 1:1 slide count.",
+  "typography": {
+    "body_font_size_pt": 24,
+    "body_font_size_pt_by_layout": {
+      "2 Column": 20,
+      "2 Column - MidnightSky": 20,
+      "2 Column Images": 20,
+      "2 Column Images - MidnightSky": 20,
+      "3 Column": 18,
+      "3 Column - MidnightSky": 18
+    }
+  },
+  "cover_chapter_divider": {
+    "enabled": true,
+    "layout": "Title - 2"
+  },
+  "rules": [
+    {
+      "name": "high-content text slides prefer 2 Column split",
+      "when": {
+        "min_body_paragraphs": 7,
+        "title_is_upper": false,
+        "has_picture_placeholder": false
+      },
+      "prefer_layouts": ["2 Column"],
+      "score_bonus": 12
+    },
+    {
+      "name": "source Section Header slides prefer dark 1 Column",
+      "when": {
+        "input_layout_name_in": ["Section Header"]
+      },
+      "prefer_layouts": ["1 Column - MidnightSky"],
+      "score_bonus": 30
+    }
+  ]
+}

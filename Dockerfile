@@ -20,6 +20,11 @@ COPY pdfViewer.py .
 COPY report.py .
 COPY server.py .
 COPY customers.json .
+COPY master_swap.py .
+COPY layout_preferences.py .
+COPY template_preferences/ ./template_preferences/
+COPY rules_default.json .
+COPY template_repair.py .
 
 # Create uploads directory
 RUN mkdir -p uploads
