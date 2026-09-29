@@ -144,6 +144,8 @@ interface DeckforgeState {
   includeTableCaptions: boolean;
   setIncludeFigureCaptions: (val: boolean) => void;
   setIncludeTableCaptions: (val: boolean) => void;
+  masterSwapMode: boolean;
+  setMasterSwapMode: (val: boolean) => void;
 
   // Step 3: PDF Figure Extraction
   pdfUrl: string | null;
@@ -206,6 +208,8 @@ export const useStore = create<DeckforgeState>((set, get) => ({
   includeTableCaptions: true,
   setIncludeFigureCaptions: (val) => set({ includeFigureCaptions: val }),
   setIncludeTableCaptions: (val) => set({ includeTableCaptions: val }),
+  masterSwapMode: false,
+  setMasterSwapMode: (val) => set({ masterSwapMode: val }),
 
   // Step 3
   pdfUrl: null,
@@ -365,6 +369,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
           figures: figuresPayload,
           include_figure_captions: get().includeFigureCaptions,
           include_table_captions: get().includeTableCaptions,
+          mode: get().masterSwapMode ? 'master_swap' : 'restyle',
         }),
       });
       const data = await res.json();
@@ -507,6 +512,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
           formData.append('caption_runs', JSON.stringify(figure.captionRuns));
         }
       }
+      if (figure.alt_text && figure.alt_text.trim()) {
+        formData.append('alt_text', figure.alt_text.trim());
+      }
 
       const res = await fetch('/api/add-image', {
         method: 'POST',
@@ -553,6 +561,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
         if (figure.captionRuns?.length) {
           formData.append('caption_runs', JSON.stringify(figure.captionRuns));
         }
+      }
+      if (figure.alt_text && figure.alt_text.trim()) {
+        formData.append('alt_text', figure.alt_text.trim());
       }
 
       const res = await fetch('/api/add-image', {

@@ -1,0 +1,68 @@
+{
+  "description": "Default layout-selection rules for master-swap mode. First matching rule wins. Rule terms match against input slide signature: {input_layout_name, title, title_is_upper, body_line_count, subheading_hits, has_figure_marker, image_count}. 'action' picks a template layout by name (from template.pptx). Special action 'split_title_slide' emits two slides: {layouts[0], layouts[1]}.",
+  "rules": [
+    {
+      "when": { "input_layout": "Title Slide" },
+      "action": "split_title_slide",
+      "layouts": ["2_Title", "Title - 2"]
+    },
+    {
+      "when": { "input_layout": "Title and Content", "body_line_count_lte": 1, "has_figure_marker": true },
+      "action": "single",
+      "layout": "1 Column - MidnightSky"
+    },
+    {
+      "when": { "input_layout": "Title and Content", "title_is_upper": true },
+      "action": "single",
+      "layout": "1 Column - MidnightSky"
+    },
+    {
+      "when": { "input_layout": "Title and Content" },
+      "action": "single",
+      "layout": "1 Column"
+    },
+    {
+      "when": { "input_layout": "Section Header" },
+      "action": "single",
+      "layout": "1 Column - MidnightSky"
+    },
+    {
+      "when": { "input_layout": "Title Only", "body_line_count_lte": 1 },
+      "action": "single",
+      "layout": "1 Column"
+    },
+    {
+      "when": { "input_layout": "Title Only", "subheading_hits_gte": 2, "body_line_count_gte": 10 },
+      "action": "single",
+      "layout": "2 Column"
+    },
+    {
+      "when": { "input_layout": "Title Only" },
+      "action": "single",
+      "layout": "1 Column"
+    }
+  ],
+  "overrides_by_output_index": {
+    "_comment": "1-based slide index in the final output → force this template layout name. Use for per-deck exceptions the rules can't infer.",
+    "6": "2 Column",
+    "7": "2 Column",
+    "8": "2 Column",
+    "9": "2 Column",
+    "10": "2 Column",
+    "12": "2 Column",
+    "13": "2 Column",
+    "14": "2 Column",
+    "18": "2 Column",
+    "19": "1 Column + Image",
+    "20": "1 Column + Image",
+    "21": "2 Column",
+    "22": "2 Column",
+    "23": "2 Column",
+    "24": "2 Column",
+    "25": "2 Column",
+    "26": "2 Column",
+    "27": "2 Column",
+    "28": "2 Column",
+    "31": "1 Column"
+  }
+}
