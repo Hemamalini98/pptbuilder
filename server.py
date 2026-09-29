@@ -16,6 +16,7 @@ from pptx.util import Pt
 # Import functions from existing files
 from main import extract_template, emu_to_pt
 from convert import convert
+from alt_text_excel import parse_alttext_excel
 
 app = FastAPI(title="PPT Builder API")
 
@@ -385,6 +386,81 @@ async def upload_ppt(file: UploadFile = File(...), session_id: str = Depends(get
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def _figure_dest_name(fig: dict) -> str | None:
+    """Normalize a figure name into the on-disk name insert_figure_placeholders looks up.
+
+    "Figure 2.1" / "Figure2.1" → "figure 2.1.png". Names that don't parse as a
+    figure/table reference fall back to a lowercased slug.
+    """
+    name = fig.get("name")
+    filename = fig.get("filename")
+    if not (name and filename):
+        return None
+    m = re.match(r"(figure|table)\s*([\d.-]+)", name, re.IGNORECASE)
+    if m:
+        return f"{m.group(1).lower()} {m.group(2)}.png"
+    return f"{name.lower()}.png"
+
+
+def _prepare_pdf_extracts(session_upload_dir: str, figures: list[dict]) -> None:
+    """(Re)create pdf_extracts/ and copy figure PNGs in with normalized names."""
+    extracts_dir = os.path.join(session_upload_dir, "pdf_extracts")
+    if os.path.exists(extracts_dir):
+        shutil.rmtree(extracts_dir)
+    os.makedirs(extracts_dir, exist_ok=True)
+    for fig in figures:
+        dest_name = _figure_dest_name(fig)
+        if not dest_name:
+            continue
+        src_path = os.path.join(session_upload_dir, fig["filename"])
+        if os.path.exists(src_path):
+            shutil.copy(src_path, os.path.join(extracts_dir, dest_name))
+
+
+def _resolve_auto_inserted_list(used_figs: list[dict], figures: list[dict]) -> list[dict]:
+    """Map insert_figure_placeholders' `used` records back to caller filenames."""
+    name_to_filename: dict[str, str] = {}
+    for fig in figures:
+        dest_name = _figure_dest_name(fig)
+        if dest_name:
+            name_to_filename.setdefault(dest_name, fig["filename"])
+    out = []
+    for uf in used_figs:
+        orig = name_to_filename.get(uf["dest_name"])
+        if orig:
+            out.append({
+                "filename": orig,
+                "slideIndex": uf["slideIndex"],
+                "shapeIndex": uf["shapeIndex"],
+            })
+    return out
+
+
+def _extract_and_attach_image_urls(
+    session_id: str, session_upload_dir: str, output_path: str, slides_info: dict
+) -> None:
+    """Persist each picture's blob to disk and inject its URL into slides_info."""
+    prs = Presentation(output_path)
+    urls: dict[str, str] = {}
+    for s_idx, slide in enumerate(prs.slides):
+        for sh_idx, shape in enumerate(slide.shapes):
+            if not (hasattr(shape, "shape_type") and int(shape.shape_type) == 13):
+                continue
+            try:
+                img = shape.image
+                img_filename = f"slide_{s_idx}_shape_{sh_idx}.{img.ext}"
+                with open(os.path.join(session_upload_dir, img_filename), "wb") as f:
+                    f.write(img.blob)
+                urls[f"{s_idx}_{sh_idx}"] = f"/api/media/{session_id}/{img_filename}"
+            except Exception:
+                pass
+    for s_idx, slide_data in enumerate(slides_info.get("slides", [])):
+        for sh_idx, shape_data in enumerate(slide_data.get("shapes", [])):
+            key = f"{s_idx}_{sh_idx}"
+            if key in urls:
+                shape_data["imageUrl"] = urls[key]
+
+
 @app.post("/api/process-ppt")
 async def process_ppt(payload: dict = None, session_id: str = Depends(get_session_id)):
     print("PROCESS_PPT payload:", payload)
@@ -393,116 +469,68 @@ async def process_ppt(payload: dict = None, session_id: str = Depends(get_sessio
         raise HTTPException(status_code=400, detail="Missing uploaded PPTX or Template style JSON")
 
     mode = (payload or {}).get("mode", "restyle")
+    session_upload_dir = get_session_upload_dir(session_id)
+    output_path = os.path.join(session_upload_dir, "styled_output.pptx")
+    figures = (payload or {}).get("figures", []) or []
+    include_figure_captions = (payload or {}).get("include_figure_captions", True)
+    include_table_captions = (payload or {}).get("include_table_captions", True)
+
     if mode == "master_swap":
-        # Master-swap mode: rebuild the input deck inside a fresh copy of the
-        # template so the output inherits the template's master + layouts +
-        # theme. Ignores the PDF-figure workflow entirely.
+        # Rebuild the input deck inside a fresh copy of the template so the
+        # output inherits the template's master + layouts + theme, then run
+        # the same figure-insertion pass restyle uses. When `figures` is
+        # empty the figure pass is a no-op — master_swap alone continues to
+        # produce the same output it always did.
         from master_swap import apply_template
-        session_upload_dir = get_session_upload_dir(session_id)
-        output_path = os.path.join(session_upload_dir, "styled_output.pptx")
+        from convert import insert_figure_placeholders
+
         try:
             apply_template(
                 state["content_pptx"], state["template_pptx"], output_path
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"master_swap failed: {e}")
+
+        used_figs: list[dict] = []
+        if figures:
+            try:
+                _prepare_pdf_extracts(session_upload_dir, figures)
+                prs = Presentation(output_path)
+                used_figs = insert_figure_placeholders(
+                    prs, session_upload_dir,
+                    figures_metadata=figures,
+                    template=state["template_style_json"],
+                    include_figure_captions=include_figure_captions,
+                    include_table_captions=include_table_captions,
+                )
+                prs.save(output_path)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"figure insertion failed: {e}")
+
         state["styled_pptx"] = output_path
-        state["auto_inserted_list"] = []
+        auto_inserted_list = _resolve_auto_inserted_list(used_figs, figures)
+        state["auto_inserted_list"] = auto_inserted_list
+
         slides_info = extract_template(output_path)
-        return {"ok": True, "slidesInfo": slides_info, "autoInserted": []}
+        _extract_and_attach_image_urls(session_id, session_upload_dir, output_path, slides_info)
+        return {"ok": True, "slidesInfo": slides_info, "autoInserted": auto_inserted_list}
 
     try:
-        session_upload_dir = get_session_upload_dir(session_id)
-        # Recreate pdf_extracts folder
-        extracts_dir = os.path.join(session_upload_dir, "pdf_extracts")
-        if os.path.exists(extracts_dir):
-            shutil.rmtree(extracts_dir)
-        os.makedirs(extracts_dir, exist_ok=True)
-
-        include_figure_captions = (payload or {}).get("include_figure_captions", True)
-        include_table_captions = (payload or {}).get("include_table_captions", True)
-
-        # Copy crops with proper names
-        figures = (payload or {}).get("figures", [])
-        for fig in figures:
-            name = fig.get("name")
-            filename = fig.get("filename")
-            if name and filename:
-                src_path = os.path.join(session_upload_dir, filename)
-                if os.path.exists(src_path):
-                    # Match name (e.g. "Figure 1.1" or "Figure1.1") and write it with a space
-                    m = re.match(r"(figure|table)\s*([\d.-]+)", name, re.IGNORECASE)
-                    if m:
-                        dest_name = f"{m.group(1).lower()} {m.group(2)}.png"
-                    else:
-                        dest_name = f"{name.lower()}.png"
-                    shutil.copy(src_path, os.path.join(extracts_dir, dest_name))
-
-        output_path = os.path.join(session_upload_dir, "styled_output.pptx")
+        _prepare_pdf_extracts(session_upload_dir, figures)
         # Run conversion style formatting and automatic figure insertion
-        used_figs = convert(state["content_pptx"], state["template_style_json"], output_path, apply_geometry=True, figures_metadata=figures, include_figure_captions=include_figure_captions, include_table_captions=include_table_captions)
+        used_figs = convert(
+            state["content_pptx"], state["template_style_json"], output_path,
+            apply_geometry=True, figures_metadata=figures,
+            include_figure_captions=include_figure_captions,
+            include_table_captions=include_table_captions,
+        )
         state["styled_pptx"] = output_path
-
-        # Resolve auto-inserted figures back to original filenames
-        auto_inserted_list = []
-        for uf in used_figs:
-            dest_name = uf["dest_name"]
-            orig_filename = None
-            for fig in figures:
-                name = fig.get("name")
-                filename = fig.get("filename")
-                if name and filename:
-                    m = re.match(r"(figure|table)\s*([\d.-]+)", name, re.IGNORECASE)
-                    if m:
-                        candidate = f"{m.group(1).lower()} {m.group(2)}.png"
-                    else:
-                        candidate = f"{name.lower()}.png"
-                    if candidate == dest_name:
-                        orig_filename = filename
-                        break
-            if orig_filename:
-                auto_inserted_list.append({
-                    "filename": orig_filename,
-                    "slideIndex": uf["slideIndex"],
-                    "shapeIndex": uf["shapeIndex"]
-                })
-        
-        # Save auto inserted list into local variable for returning in the response
+        auto_inserted_list = _resolve_auto_inserted_list(used_figs, figures)
         state["auto_inserted_list"] = auto_inserted_list
-        
-        # Extract slides structure of the output file
-        slides_info = extract_template(output_path)
-        
-        # Extract image components if any so we can display them
-        # Go through shapes to extract image blobs
-        prs = Presentation(output_path)
-        extracted_images = {}
-        for s_idx, slide in enumerate(prs.slides):
-            for sh_idx, shape in enumerate(slide.shapes):
-                if hasattr(shape, "shape_type") and int(shape.shape_type) == 13: # PICTURE
-                    try:
-                        img = shape.image
-                        ext = img.ext
-                        img_filename = f"slide_{s_idx}_shape_{sh_idx}.{ext}"
-                        img_path = os.path.join(session_upload_dir, img_filename)
-                        with open(img_path, "wb") as f:
-                            f.write(img.blob)
-                        extracted_images[f"{s_idx}_{sh_idx}"] = f"/api/media/{session_id}/{img_filename}"
-                    except Exception:
-                        pass
-        
-        # Inject image URLs into the shapes json
-        for s_idx, slide_data in enumerate(slides_info.get("slides", [])):
-            for sh_idx, shape_data in enumerate(slide_data.get("shapes", [])):
-                key = f"{s_idx}_{sh_idx}"
-                if key in extracted_images:
-                    shape_data["imageUrl"] = extracted_images[key]
 
-        return {
-            "ok": True, 
-            "slidesInfo": slides_info, 
-            "autoInserted": state.get("auto_inserted_list", [])
-        }
+        slides_info = extract_template(output_path)
+        _extract_and_attach_image_urls(session_id, session_upload_dir, output_path, slides_info)
+        return {"ok": True, "slidesInfo": slides_info, "autoInserted": auto_inserted_list}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -530,6 +558,32 @@ async def upload_pdf(file: UploadFile = File(...), session_id: str = Depends(get
         return {"ok": True, "filename": filename, "pageCount": page_count, "captions": captions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/parse-alttext-excel")
+async def parse_alttext_excel_endpoint(file: UploadFile = File(...), session_id: str = Depends(get_session_id)):
+    """Parse a client-supplied alt-text Excel and return normalized entries.
+
+    Fully generic: the parser locates columns by header name, so any
+    customer's workbook layout works as long as it exposes Chapter Number,
+    Element Number, and Alt Text - Short columns. No customer branching.
+    """
+    session_upload_dir = get_session_upload_dir(session_id)
+    path = os.path.join(session_upload_dir, "alt_text.xlsx")
+    try:
+        with open(path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to save upload: {e}")
+
+    try:
+        entries = parse_alttext_excel(path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"failed to parse workbook: {e}")
+
+    state = get_session_state(session_id)
+    state["alt_text_entries"] = entries
+    return {"ok": True, "entries": entries, "count": len(entries)}
+
 
 @app.get("/api/pdf/captions")
 async def get_pdf_captions(session_id: str = Depends(get_session_id)):
@@ -621,6 +675,7 @@ async def add_image(
     h_pt: float = Form(...),
     caption: str = Form(None),
     caption_runs: str = Form(None),
+    alt_text: str = Form(None),
     session_id: str = Depends(get_session_id)
 ):
     state = get_session_state(session_id)
@@ -653,7 +708,22 @@ async def add_image(
         
         # Insert image
         pic = slide.shapes.add_picture(image_path, left, top, width, height)
-        
+
+        # Stamp WCAG-required alt text on the inserted picture. python-pptx
+        # defaults `descr` to the source image filename on add_picture, which
+        # accessibility tooling flags as a false positive; always overwrite.
+        # Same idiom used by the batch convert() figure-insertion path so
+        # both entry points behave identically.
+        try:
+            cNvPr = pic._element.nvPicPr.cNvPr
+            trimmed = (alt_text or "").strip()
+            if trimmed:
+                cNvPr.set('descr', trimmed)
+            else:
+                cNvPr.attrib.pop('descr', None)
+        except Exception:
+            pass
+
         if caption:
             cap_top = top + height + Pt(10)
             cap_height = Pt(35)

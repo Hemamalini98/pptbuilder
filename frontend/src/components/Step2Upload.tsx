@@ -311,7 +311,7 @@ export const Step2Upload: React.FC = () => {
               </span>
             </label>
             <span className="text-xs text-[var(--color-muted)]">
-              Rebuild deck inside the template (no PDF/figure workflow needed).
+              Rebuild deck inside the template. Combine with PDF figures or skip and export directly.
             </span>
           </div>
           <div className="flex justify-between items-center bg-white/60 p-4 border border-[var(--color-border)] rounded-[var(--radius-custom)]">
@@ -321,39 +321,49 @@ export const Step2Upload: React.FC = () => {
                 Using template master: <strong>{selectedTemplate ? selectedTemplate.name : "None selected"}</strong>
               </span>
             </div>
-            {masterSwapMode ? (
-              <button
-                onClick={async () => {
-                  console.log('[master-swap] click', { inputPptName, selectedTemplate, masterSwapMode });
-                  try {
-                    await convertDeck(5);
-                    toast.success('Master swap complete');
-                  } catch (e: any) {
-                    console.error('[master-swap] convertDeck threw:', e);
-                    toast.error(`Master swap failed: ${e?.message || e}`);
-                  }
-                }}
-                disabled={!inputPptName || !selectedTemplate}
-                title={
-                  !inputPptName
-                    ? 'Upload a content PPTX first'
-                    : !selectedTemplate
-                    ? 'Select a template first'
-                    : 'Ready to convert'
-                }
-                className="px-6 py-3 bg-[var(--color-amber)] hover:bg-amber-500 disabled:bg-neutral-300 text-white font-semibold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md"
-              >
-                Run Master Swap Now
-              </button>
-            ) : (
+            <div className="flex items-center gap-2">
               <button
                 onClick={() => setStep(3)}
                 disabled={!inputPptName || !sourcePdfName}
+                title={
+                  !inputPptName
+                    ? 'Upload a content PPTX first'
+                    : !sourcePdfName
+                    ? 'Upload a source PDF first'
+                    : masterSwapMode
+                    ? 'Rebuild with template + insert PDF figures'
+                    : 'Proceed to figure workflow'
+                }
                 className="px-6 py-3 bg-[var(--color-navy)] hover:bg-[var(--color-navy-light)] disabled:bg-neutral-300 text-white font-semibold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md"
               >
                 Proceed to PDF Figures
               </button>
-            )}
+              {masterSwapMode && (
+                <button
+                  onClick={async () => {
+                    console.log('[master-swap] click', { inputPptName, selectedTemplate, masterSwapMode });
+                    try {
+                      await convertDeck(5);
+                      toast.success('Master swap complete');
+                    } catch (e: any) {
+                      console.error('[master-swap] convertDeck threw:', e);
+                      toast.error(`Master swap failed: ${e?.message || e}`);
+                    }
+                  }}
+                  disabled={!inputPptName || !selectedTemplate}
+                  title={
+                    !inputPptName
+                      ? 'Upload a content PPTX first'
+                      : !selectedTemplate
+                      ? 'Select a template first'
+                      : 'Rebuild deck now without inserting PDF figures'
+                  }
+                  className="px-6 py-3 bg-[var(--color-amber)] hover:bg-amber-500 disabled:bg-neutral-300 text-white font-semibold rounded-[var(--radius-custom)] transition-all cursor-pointer shadow-md"
+                >
+                  Skip PDF &amp; Run Now
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

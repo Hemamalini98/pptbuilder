@@ -512,6 +512,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
           formData.append('caption_runs', JSON.stringify(figure.captionRuns));
         }
       }
+      if (figure.alt_text && figure.alt_text.trim()) {
+        formData.append('alt_text', figure.alt_text.trim());
+      }
 
       const res = await fetch('/api/add-image', {
         method: 'POST',
@@ -558,6 +561,9 @@ export const useStore = create<DeckforgeState>((set, get) => ({
         if (figure.captionRuns?.length) {
           formData.append('caption_runs', JSON.stringify(figure.captionRuns));
         }
+      }
+      if (figure.alt_text && figure.alt_text.trim()) {
+        formData.append('alt_text', figure.alt_text.trim());
       }
 
       const res = await fetch('/api/add-image', {

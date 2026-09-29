@@ -81,6 +81,11 @@ class SlideSignature:
     # placeholders, `_fill_body_slide` maps source columns to target
     # placeholders 1:1 so two-column decks land correctly.
     body_columns: list[list[dict]] = None  # type: ignore[assignment]
+    # Paragraphs captured from source SUBTITLE placeholder(s). Kept
+    # separate from body_paragraphs / decorative_paragraphs so the fill
+    # step can route them to the target layout's subtitle placeholder
+    # (when present) or emit a TextBox fallback below the title.
+    subtitle_paragraphs: list[dict] = None  # type: ignore[assignment]
 
 
 def _extract_run(run) -> dict:
@@ -186,6 +191,8 @@ def analyze_input_slide(slide: Slide, idx: int) -> SlideSignature:
     title_bottom_emu: int | None = None
     title_top_emu: int | None = None
     title_is_center = False
+    subtitle_paras: list[dict] = []
+    subtitle_shape_ids: set = set()
     try:
         slide_height_emu = int(slide.part.package.presentation_part.presentation.slide_height or 0)
     except Exception:
@@ -206,6 +213,19 @@ def analyze_input_slide(slide: Slide, idx: int) -> SlideSignature:
             except Exception:
                 pass
         if "SUBTITLE" in t:
+            # Capture subtitle paragraphs so `_fill_body_slide` can route
+            # them to the target layout's subtitle placeholder (or a
+            # fallback TextBox). Record the shape id so the main body-
+            # collection loop below does not double-capture the same
+            # paragraphs into decorative_paragraphs.
+            if ph.has_text_frame:
+                for p in ph.text_frame.paragraphs:
+                    if p.text.strip():
+                        subtitle_paras.append(_extract_paragraph(p))
+                try:
+                    subtitle_shape_ids.add(id(ph._element))
+                except Exception:
+                    pass
             continue  # subtitle is title-slide furniture, not body content
         if any(k in t for k in ("BODY", "OBJECT", "TEXT", "CONTENT")):
             has_body_placeholder = True
@@ -270,6 +290,14 @@ def analyze_input_slide(slide: Slide, idx: int) -> SlideSignature:
             image_count += 1
         if not shape.has_text_frame:
             continue
+        # Subtitle placeholders were already captured into
+        # `subtitle_paras` above; skip them here so their content does not
+        # get double-emitted as decorative text or body content.
+        try:
+            if id(shape._element) in subtitle_shape_ids:
+                continue
+        except Exception:
+            pass
         # Body/object placeholders always contribute. Loose shapes only
         # contribute if they sit clear of the title area — anything in the
         # title's vertical band is treated as decorative title-block text
@@ -353,8 +381,14 @@ def analyze_input_slide(slide: Slide, idx: int) -> SlideSignature:
         title_size_pt=title_size_pt,
         has_body_placeholder=has_body_placeholder,
         has_picture_placeholder=has_picture_placeholder,
-        decorative_paragraphs=decorative_paras,
+        # Mirror subtitle paragraphs into decorative_paragraphs so templates
+        # that opt into `cover_chapter_divider` (which consumes decorative
+        # content) keep the pre-existing behavior. Subtitle placement in
+        # `_write_subtitle` remains independent — the two paths do not
+        # collide because chapter dividers are additional slides.
+        decorative_paragraphs=decorative_paras + list(subtitle_paras),
         body_columns=[col for col in body_columns if col],
+        subtitle_paragraphs=subtitle_paras,
     )
 
 
@@ -1147,8 +1181,13 @@ def _find_title_placeholder(slide: Slide):
     return _find_placeholder(slide, idx=0)
 
 
-def _find_body_placeholders(slide: Slide) -> list:
-    """Return all body/object placeholders on the slide, sorted by idx."""
+def _find_body_placeholders(slide: Slide, *, include_subtitle: bool = True) -> list:
+    """Return all body/object placeholders on the slide, sorted by idx.
+
+    When `include_subtitle=False`, SUBTITLE placeholders are excluded — the
+    caller has already routed dedicated subtitle content to them and does
+    not want body content to overwrite that.
+    """
     out = []
     for ph in slide.placeholders:
         try:
@@ -1156,11 +1195,73 @@ def _find_body_placeholders(slide: Slide) -> list:
             if fmt.idx == 0:
                 continue
             type_str = str(fmt.type)
+            is_subtitle = "SUBTITLE" in type_str
+            if is_subtitle and not include_subtitle:
+                continue
             if any(k in type_str for k in ("BODY", "OBJECT", "SUBTITLE")):
                 out.append((fmt.idx, ph))
         except Exception:
             continue
     return [ph for _, ph in sorted(out, key=lambda t: t[0])]
+
+
+def _find_subtitle_placeholder(slide: Slide):
+    """Return the slide's first SUBTITLE placeholder, or None."""
+    for ph in slide.placeholders:
+        try:
+            if "SUBTITLE" in str(ph.placeholder_format.type or "").upper():
+                return ph
+        except Exception:
+            continue
+    return None
+
+
+def _write_subtitle(slide: Slide, subtitle_paras: list[dict]) -> bool:
+    """Emit captured source subtitle content onto the target slide.
+
+    Preference order — generic, no template-specific rules:
+      1. Target layout exposes a SUBTITLE placeholder → write into it.
+      2. Otherwise → emit a decorative TextBox positioned just below the
+         title placeholder, spanning the slide's usable width.
+
+    Returns True when the subtitle placeholder itself was populated
+    (caller can then skip it when distributing body content).
+    """
+    if not subtitle_paras:
+        return False
+
+    sub_ph = _find_subtitle_placeholder(slide)
+    if sub_ph is not None:
+        _write_paragraphs(sub_ph, subtitle_paras, is_body=False, bullet=None)
+        _copy_geometry_from_layout(sub_ph, slide.slide_layout)
+        return True
+
+    # Fallback: TextBox anchored below the title. Uses layout title
+    # geometry when available, otherwise slide-relative defaults.
+    try:
+        pres = slide.part.package.presentation_part.presentation
+        slide_w = int(pres.slide_width or 0)
+        slide_h = int(pres.slide_height or 0)
+    except Exception:
+        slide_w = slide_h = 0
+    if slide_w <= 0 or slide_h <= 0:
+        return False
+
+    title_ph = _find_title_placeholder(slide)
+    if title_ph is not None and title_ph.top is not None and title_ph.height is not None:
+        left = int(title_ph.left) if title_ph.left is not None else int(slide_w * 0.10)
+        width = int(title_ph.width) if title_ph.width is not None else int(slide_w * 0.80)
+        top = int(title_ph.top) + int(title_ph.height) + Emu(int(0.1 * 914400))
+    else:
+        left = int(slide_w * 0.10)
+        width = int(slide_w * 0.80)
+        top = int(slide_h * 0.18)
+    height = Emu(int(0.7 * 914400))
+
+    tb = slide.shapes.add_textbox(left, top, width, height)
+    tb.text_frame.word_wrap = True
+    _write_paragraphs(tb, subtitle_paras, is_body=False, bullet=None)
+    return False
 
 
 def _split_out_figure_markers(
@@ -1186,25 +1287,82 @@ def _split_out_figure_markers(
 def _target_area_for_marker(layout: SlideLayout) -> tuple[int, int, int, int] | None:
     """Return (left, top, width, height) of the area to drop marker TextBox in.
 
-    Prefers layout's ph15 (image slot / right column). Falls back to ph12
-    (body area) for single-column layouts that have no ph15.
+    Fully generic — never returns None when the presentation has known
+    dimensions, so figure/table markers are never silently dropped:
+
+      1. Layout's ph15 (image slot / right column) — where hand-authored
+         decks put markers when the layout has a dedicated picture slot.
+      2. Layout's ph12 (body area) — for single-column layouts that carry
+         markers within their body region.
+      3. Any other body-type placeholder on the layout (excluding the
+         title). Picks the largest by area, so markers land in the primary
+         content region regardless of the template's idx numbering.
+      4. Slide-relative computed rectangle beneath the title. Used when
+         the layout has no body/content placeholders at all (e.g.
+         Title-Only), so the marker still appears on the slide.
     """
     ph15 = ph12 = None
+    title_ph = None
+    body_candidates: list = []
     for lp in layout.placeholders:
         try:
             idx = lp.placeholder_format.idx
+            ph_type = str(lp.placeholder_format.type or "").upper()
         except Exception:
             continue
         if idx == 15:
             ph15 = lp
         elif idx == 12:
             ph12 = lp
-    target = ph15 or ph12
-    if target is None:
+        elif "TITLE" in ph_type or idx == 0:
+            title_ph = lp
+        elif any(k in ph_type for k in ("BODY", "OBJECT", "CONTENT", "TEXT", "SUBTITLE")):
+            body_candidates.append(lp)
+
+    def _geom(p):
+        if p is None:
+            return None
+        if None in (p.left, p.top, p.width, p.height):
+            return None
+        return int(p.left), int(p.top), int(p.width), int(p.height)
+
+    for cand in (ph15, ph12):
+        geom = _geom(cand)
+        if geom is not None:
+            return geom
+
+    def _area(p):
+        try:
+            return int(p.width or 0) * int(p.height or 0)
+        except Exception:
+            return 0
+    for cand in sorted(body_candidates, key=_area, reverse=True):
+        geom = _geom(cand)
+        if geom is not None:
+            return geom
+
+    try:
+        pres = layout.part.package.presentation_part.presentation
+        slide_w = int(pres.slide_width or 0)
+        slide_h = int(pres.slide_height or 0)
+    except Exception:
         return None
-    if None in (target.left, target.top, target.width, target.height):
+    if slide_w <= 0 or slide_h <= 0:
         return None
-    return target.left, target.top, target.width, target.height
+    # Default content band: 10% side margins, top-band reserved for title.
+    left = int(slide_w * 0.10)
+    width = int(slide_w * 0.80)
+    top = int(slide_h * 0.20)
+    height = int(slide_h * 0.65)
+    title_geom = _geom(title_ph)
+    if title_geom is not None:
+        # Push the marker area below the title band + a small gap.
+        gap = int(Emu(int(0.2 * 914400)))
+        band_bottom = title_geom[1] + title_geom[3] + gap
+        if band_bottom > top:
+            top = band_bottom
+            height = max(int(slide_h * 0.30), slide_h - top - int(slide_h * 0.05))
+    return left, top, width, height
 
 
 def _add_marker_textboxes(
@@ -1626,6 +1784,15 @@ def _fill_body_slide(
             layout=slide.slide_layout,
         )
 
+    # Emit source SUBTITLE content into the target slide before body
+    # distribution. When the target layout has a SUBTITLE placeholder we
+    # write into it and skip it during body distribution so the two do
+    # not collide; when no SUBTITLE placeholder exists we drop a TextBox
+    # below the title so meaningful subtitle text (e.g. "CHAPTER 2") is
+    # preserved regardless of the chosen layout.
+    subtitle_paras = list(sig.subtitle_paragraphs or [])
+    subtitle_filled_ph = _write_subtitle(slide, subtitle_paras)
+
     # Peel off figure/table markers so they land in a dedicated red TextBox
     # instead of being lumped into the body placeholder.
     content_paras, marker_paras = _split_out_figure_markers(sig.body_paragraphs)
@@ -1645,7 +1812,12 @@ def _fill_body_slide(
     prs = slide.part.package.presentation_part.presentation
     bullet = _pick_bullet_for_slide(prs, slide.slide_layout, level=0)
 
-    bodies = _find_body_placeholders(slide)
+    # When we already routed content into the SUBTITLE placeholder, keep
+    # body distribution off of it. When no subtitle content was captured,
+    # keep the legacy behavior of treating SUBTITLE as a body candidate so
+    # decks that pick a Title-Slide layout for a content slide still get
+    # their bullets written somewhere.
+    bodies = _find_body_placeholders(slide, include_subtitle=not subtitle_filled_ph)
     filled_body: set = set()
     if bodies and content_paras:
         # Distribute source columns across target body placeholders.
