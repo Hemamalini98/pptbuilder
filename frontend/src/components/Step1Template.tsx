@@ -54,10 +54,10 @@ export const Step1Template: React.FC = () => {
 
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const file = e.dataTransfer.files[0];
-      if (file.name.endsWith('.pptx')) {
+      if (file.name.endsWith('.pptx') || file.name.endsWith('.potx')) {
         await handleUpload(file);
       } else {
-        toast.error("Please upload a valid .pptx file.");
+        toast.error("Please upload a valid .pptx or .potx file.");
       }
     }
   };
@@ -230,7 +230,7 @@ export const Step1Template: React.FC = () => {
                   type="file"
                   ref={fileInputRef}
                   onChange={handleFileInput}
-                  accept=".pptx"
+                  accept=".pptx,.potx"
                   className="hidden"
                 />
                 {templateLoading ? (
@@ -245,7 +245,7 @@ export const Step1Template: React.FC = () => {
                     </div>
                     <div>
                       <p className="text-sm font-semibold text-[var(--color-navy)]">
-                        Drag and drop your template `.pptx`
+                        Drag and drop your template `.pptx` or `.potx`
                       </p>
                       <p className="text-xs text-[var(--color-muted)] mt-1">
                         PowerPoint Presentation up to 50MB

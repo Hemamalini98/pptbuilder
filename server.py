@@ -6,6 +6,16 @@ import json
 import re
 import asyncio
 import time
+import zipfile
+import pptx.api
+from pptx.opc.constants import CONTENT_TYPE as CT
+
+# Enable support for .potx (PowerPoint Template) files
+_orig_is_pptx_package = pptx.api._is_pptx_package
+def _patched_is_pptx_package(prs_part):
+    return _orig_is_pptx_package(prs_part) or prs_part.content_type == CT.PML_TEMPLATE_MAIN
+pptx.api._is_pptx_package = _patched_is_pptx_package
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Cookie, Header, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -301,6 +311,24 @@ def render_ppt_to_pngs(pptx_path, upload_dir):
         png_path = os.path.join(output_dir, f"slide_{i}.png")
         pix.save(png_path)
 
+def ensure_potx_as_pptx(file_path: str) -> str:
+    """If file_path is a .potx file, convert it to a standard .pptx format."""
+    if not file_path.lower().endswith(".potx"):
+        return file_path
+    pptx_path = os.path.splitext(file_path)[0] + ".pptx"
+    with zipfile.ZipFile(file_path, "r") as zin:
+        with zipfile.ZipFile(pptx_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                content = zin.read(item.filename)
+                if item.filename == "[Content_Types].xml":
+                    content = content.replace(
+                        b"application/vnd.openxmlformats-officedocument.presentationml.template.main+xml",
+                        b"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+                    )
+                zout.writestr(item, content)
+    return pptx_path
+
+
 @app.post("/api/upload-template")
 async def upload_template(file: UploadFile = File(...), session_id: str = Depends(get_session_id)):
     try:
@@ -308,6 +336,11 @@ async def upload_template(file: UploadFile = File(...), session_id: str = Depend
         path = os.path.join(TEMPLATES_DIR, filename)
         with open(path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        
+        # If a .potx template was uploaded, normalize it to .pptx as well
+        if filename.lower().endswith(".potx"):
+            path = ensure_potx_as_pptx(path)
+            filename = os.path.basename(path)
         
         state = get_session_state(session_id)
         state["template_pptx"] = path
@@ -330,7 +363,7 @@ async def get_templates(session_id: str = Depends(get_session_id)):
         templates = []
         if os.path.exists(TEMPLATES_DIR):
             for f in os.listdir(TEMPLATES_DIR):
-                if f.endswith(".pptx"):
+                if f.lower().endswith((".pptx", ".potx")):
                     templates.append({
                         "name": os.path.splitext(f)[0],
                         "filename": f
@@ -346,6 +379,10 @@ async def select_template(data: dict, session_id: str = Depends(get_session_id))
         raise HTTPException(status_code=400, detail="Missing filename")
     
     path = os.path.join(TEMPLATES_DIR, filename)
+    if filename.lower().endswith(".potx"):
+        path = ensure_potx_as_pptx(path)
+        filename = os.path.basename(path)
+
     style_json_filename = os.path.splitext(filename)[0] + "_styles.json"
     style_json_path = os.path.join(TEMPLATES_DIR, style_json_filename)
     

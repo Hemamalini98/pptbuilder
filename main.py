@@ -1,3 +1,12 @@
+import pptx.api
+from pptx.opc.constants import CONTENT_TYPE as CT
+
+# Enable support for .potx (PowerPoint Template) files
+_orig_is_pptx_package = pptx.api._is_pptx_package
+def _patched_is_pptx_package(prs_part):
+    return _orig_is_pptx_package(prs_part) or prs_part.content_type == CT.PML_TEMPLATE_MAIN
+pptx.api._is_pptx_package = _patched_is_pptx_package
+
 from pptx import Presentation
 from pptx.util import Pt
 from pptx.dml.color import RGBColor

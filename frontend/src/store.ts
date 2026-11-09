@@ -257,7 +257,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       const data = await res.json();
       if (data.ok) {
         set({
-          selectedTemplate: { name: file.name.replace('.pptx', ''), filename: data.filename },
+          selectedTemplate: { name: file.name.replace(/\.(pptx|potx)$/i, ''), filename: data.filename },
           templateStyles: data.styles,
         });
         await get().fetchTemplates();
@@ -283,7 +283,7 @@ export const useStore = create<DeckforgeState>((set, get) => ({
       const data = await res.json();
       if (data.ok) {
         set({
-          selectedTemplate: { name: filename.replace('.pptx', ''), filename },
+          selectedTemplate: { name: filename.replace(/\.(pptx|potx)$/i, ''), filename },
           templateStyles: data.styles,
         });
       }
